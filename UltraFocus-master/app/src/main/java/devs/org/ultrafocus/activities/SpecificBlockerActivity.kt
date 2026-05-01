@@ -249,10 +249,10 @@ class SpecificBlockerActivity : AppCompatActivity() {
         }
 
         adapter = ArrayAdapter<String>(
-            this,
-            android.R.layout.simple_list_item_1,
-            list.toList()
-        )
+    this,
+    android.R.layout.simple_list_item_1,
+    list.toList()
+)
 
         listView.adapter = adapter
     }
