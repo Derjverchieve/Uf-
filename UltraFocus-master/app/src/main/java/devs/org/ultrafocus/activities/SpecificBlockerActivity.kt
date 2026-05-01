@@ -1,6 +1,7 @@
 package devs.org.ultrafocus.activities
 
 import android.os.Bundle
+import android.widget.*
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
@@ -19,21 +20,74 @@ import devs.org.ultrafocus.utils.StrictModeManager
 import devs.org.ultrafocus.utils.WebsiteBlockManager
 import androidx.activity.result.contract.ActivityResultContracts
 import devs.org.ultrafocus.utils.BackupManager
+
 class SpecificBlockerActivity : AppCompatActivity() {
 
     private lateinit var listView: ListView
     private lateinit var fabAdd: ExtendedFloatingActionButton
     private lateinit var chkDebug: CheckBox
     private lateinit var adapter: ArrayAdapter<String>
+
     private lateinit var btnExportSettings: Button
     private lateinit var btnImportSettings: Button
-    // UI Tabs
+
     private lateinit var btnTabScreens: Button
     private lateinit var btnTabKeywords: Button
     private lateinit var btnTabWeb: Button
 
-    // 0=Screens, 1=Keywords, 2=Websites
     private var currentTab = 0
+
+    // ===== IMPORT / EXPORT LAUNCHERS =====
+
+    private val exportLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.CreateDocument("application/json")
+        ) { uri ->
+            uri?.let {
+
+                if (StrictModeManager.isLocked(this)) {
+                    Toast.makeText(this,
+                        "Strict Mode Locked! Cannot export.",
+                        Toast.LENGTH_SHORT).show()
+                    return@let
+                }
+
+                val success = BackupManager.exportSettings(this, it)
+
+                Toast.makeText(
+                    this,
+                    if (success) "Export successful" else "Export failed",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+
+    private val importLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri ->
+            uri?.let {
+
+                if (StrictModeManager.isLocked(this)) {
+                    Toast.makeText(
+                        this,
+                        "Strict Mode Locked! Cannot import.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@let
+                }
+
+                val success = BackupManager.importSettings(this, it)
+
+                Toast.makeText(
+                    this,
+                    if (success) "Import successful" else "Import failed",
+                    Toast.LENGTH_SHORT
+                ).show()
+
+                refreshList()
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -45,7 +99,36 @@ class SpecificBlockerActivity : AppCompatActivity() {
         fabAdd = findViewById(R.id.fabAdd)
         chkDebug = findViewById(R.id.chkDebug)
 
-        // Dynamically add the "Web" tab button
+        btnExportSettings = findViewById(R.id.btnExportSettings)
+        btnImportSettings = findViewById(R.id.btnImportSettings)
+
+        // ===== EXPORT BUTTON =====
+        btnExportSettings.setOnClickListener {
+
+            if (StrictModeManager.isLocked(this)) {
+                Toast.makeText(this,
+                    "Strict Mode Locked! Cannot export.",
+                    Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+
+            exportLauncher.launch("ultrafocus_backup.json")
+        }
+
+        // ===== IMPORT BUTTON =====
+        btnImportSettings.setOnClickListener {
+
+            if (StrictModeManager.isLocked(this)) {
+                Toast.makeText(this,
+                    "Strict Mode Locked! Cannot import.",
+                    Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+
+            importLauncher.launch(arrayOf("application/json"))
+        }
+
+        // ===== WEB TAB =====
         val tabContainer = btnTabScreens.parent as LinearLayout
         btnTabWeb = Button(this).apply {
             text = "Web"
@@ -54,24 +137,22 @@ class SpecificBlockerActivity : AppCompatActivity() {
         }
         tabContainer.addView(btnTabWeb)
 
-        // Dynamically add the "Accountability" button at the top of the list
+        // ===== ACCOUNTABILITY BUTTON =====
         val btnAccountability = Button(this).apply {
             text = "Set Accountability Partner (Rose)"
             setOnClickListener { showAccountabilityDialog() }
         }
         (listView.parent as LinearLayout).addView(btnAccountability, 0)
 
-        // Init Debug Mode
+        // ===== DEBUG =====
         chkDebug.isChecked = SpecificScreenManager.isDebugMode(this)
         chkDebug.setOnCheckedChangeListener { _, isChecked ->
             SpecificScreenManager.setDebugMode(this, isChecked)
         }
 
-        // Tab Click Listeners
         btnTabScreens.setOnClickListener { switchTab(0) }
         btnTabKeywords.setOnClickListener { switchTab(1) }
 
-        // Add Button Listener
         fabAdd.setOnClickListener {
             if (StrictModeManager.isLocked(this)) {
                 Toast.makeText(this, "Strict Mode Locked! Cannot add new blocks.", Toast.LENGTH_SHORT).show()
@@ -80,14 +161,13 @@ class SpecificBlockerActivity : AppCompatActivity() {
             showAddDialog()
         }
 
-        // Delete Item Listener
         listView.setOnItemClickListener { _, _, position, _ ->
             if (StrictModeManager.isLocked(this)) {
                 Toast.makeText(this, "Strict Mode Locked! Cannot remove blocks.", Toast.LENGTH_SHORT).show()
                 return@setOnItemClickListener
             }
+
             val itemRaw = adapter.getItem(position) ?: return@setOnItemClickListener
-            // Clean display item to get the ID (remove the clock emoji part)
             val item = itemRaw.split("\n")[0].trim()
 
             AlertDialog.Builder(this)
@@ -105,7 +185,6 @@ class SpecificBlockerActivity : AppCompatActivity() {
                 .show()
         }
 
-        // Start on first tab
         switchTab(0)
     }
 
@@ -115,25 +194,22 @@ class SpecificBlockerActivity : AppCompatActivity() {
             setPadding(50, 40, 50, 10)
         }
 
-        val nameInput = EditText(this).apply { hint = "Partner Name (e.g. Rose)" }
-        val phoneInput = EditText(this).apply {
-            hint = "Number with Country Code (e.g. 1555000)"
-            inputType = android.text.InputType.TYPE_CLASS_PHONE
-        }
+        val nameInput = EditText(this).apply { hint = "Partner Name" }
+        val phoneInput = EditText(this).apply { hint = "Phone Number" }
 
         layout.addView(nameInput)
         layout.addView(phoneInput)
 
         AlertDialog.Builder(this)
-            .setTitle("The Rose Protocol")
-            .setMessage("If you break Strict Mode, a WhatsApp message will be prepared for this contact.")
+            .setTitle("Accountability")
             .setView(layout)
             .setPositiveButton("Save") { _, _ ->
                 val name = nameInput.text.toString()
                 val phone = phoneInput.text.toString()
+
                 if (name.isNotEmpty() && phone.isNotEmpty()) {
                     AccountabilityManager.setPartner(this, name, phone)
-                    Toast.makeText(this, "Accountability Set.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show()
                 }
             }
             .setNegativeButton("Cancel", null)
@@ -142,7 +218,7 @@ class SpecificBlockerActivity : AppCompatActivity() {
 
     private fun switchTab(index: Int) {
         currentTab = index
-        // Visual feedback for tabs
+
         btnTabScreens.alpha = if(index==0) 1f else 0.5f
         btnTabKeywords.alpha = if(index==1) 1f else 0.5f
         btnTabWeb.alpha = if(index==2) 1f else 0.5f
@@ -153,6 +229,7 @@ class SpecificBlockerActivity : AppCompatActivity() {
             2 -> "Add Website"
             else -> "Add"
         }
+
         refreshList()
     }
 
@@ -163,17 +240,18 @@ class SpecificBlockerActivity : AppCompatActivity() {
         }
 
         val input = EditText(this)
+        val timeInput = EditText(this)
+
         input.hint = when(currentTab) {
             0 -> "Class Name"
-            1 -> "Keyword (e.g. reels)"
-            2 -> "Website (e.g. facebook.com)"
+            1 -> "Keyword"
+            2 -> "Website"
             else -> ""
         }
-        layout.addView(input)
 
-        // Time Input for ALL tabs
-        val timeInput = EditText(this)
-        timeInput.hint = "Time: 09:00-12:00,14:00-16:00"
+        timeInput.hint = "Schedule (optional)"
+
+        layout.addView(input)
         layout.addView(timeInput)
 
         AlertDialog.Builder(this)
@@ -183,21 +261,15 @@ class SpecificBlockerActivity : AppCompatActivity() {
                 val text = input.text.toString().trim()
                 val schedule = timeInput.text.toString().trim()
 
-                if (text.isNotEmpty()) {
-                    // Prevent blocking self
-                    if (text.contains("devs.org.ultrafocus")) {
-                        Toast.makeText(this, "Cannot block the blocker!", Toast.LENGTH_SHORT).show()
-                        return@setPositiveButton
-                    }
+                if (text.isEmpty()) return@setPositiveButton
 
-                    // Add to correct manager
-                    when(currentTab) {
-                        0 -> SpecificScreenManager.addScreen(this, text, if (schedule.isEmpty()) null else schedule)
-                        1 -> ContentBlockManager.addKeyword(this, text, if (schedule.isEmpty()) null else schedule)
-                        2 -> WebsiteBlockManager.addSite(this, text, if (schedule.isEmpty()) null else schedule)
-                    }
-                    refreshList()
+                when(currentTab) {
+                    0 -> SpecificScreenManager.addScreen(this, text, schedule.ifEmpty { null })
+                    1 -> ContentBlockManager.addKeyword(this, text, schedule.ifEmpty { null })
+                    2 -> WebsiteBlockManager.addSite(this, text, schedule.ifEmpty { null })
                 }
+
+                refreshList()
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -205,20 +277,12 @@ class SpecificBlockerActivity : AppCompatActivity() {
 
     private fun refreshList() {
         val list = when(currentTab) {
-            0 -> SpecificScreenManager.getBlockedScreens(this).map {
-                val s = SpecificScreenManager.getSchedule(this, it)
-                if(s.isNotEmpty()) "$it\n(⏰ $s)" else it
-            }
-            1 -> ContentBlockManager.getKeywords(this).map {
-                val s = ContentBlockManager.getSchedule(this, it)
-                if(s.isNotEmpty()) "$it\n(⏰ $s)" else it
-            }
-            2 -> WebsiteBlockManager.getBlockedSites(this).map {
-                val s = WebsiteBlockManager.getSchedule(this, it)
-                if(s.isNotEmpty()) "$it\n(⏰ $s)" else it
-            }
+            0 -> SpecificScreenManager.getBlockedScreens(this)
+            1 -> ContentBlockManager.getKeywords(this)
+            2 -> WebsiteBlockManager.getBlockedSites(this)
             else -> emptyList()
         }
+
         adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, list)
         listView.adapter = adapter
     }
