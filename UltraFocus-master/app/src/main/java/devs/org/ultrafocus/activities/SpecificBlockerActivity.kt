@@ -2,24 +2,12 @@ package devs.org.ultrafocus.activities
 
 import android.os.Bundle
 import android.widget.*
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.CheckBox
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ListView
-import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
 import devs.org.ultrafocus.R
-import devs.org.ultrafocus.utils.AccountabilityManager
-import devs.org.ultrafocus.utils.ContentBlockManager
-import devs.org.ultrafocus.utils.SpecificScreenManager
-import devs.org.ultrafocus.utils.StrictModeManager
-import devs.org.ultrafocus.utils.WebsiteBlockManager
+import devs.org.ultrafocus.utils.*
 import androidx.activity.result.contract.ActivityResultContracts
-import devs.org.ultrafocus.utils.BackupManager
 
 class SpecificBlockerActivity : AppCompatActivity() {
 
@@ -37,18 +25,13 @@ class SpecificBlockerActivity : AppCompatActivity() {
 
     private var currentTab = 0
 
-    // ===== IMPORT / EXPORT LAUNCHERS =====
-
     private val exportLauncher =
         registerForActivityResult(
             ActivityResultContracts.CreateDocument("application/json")
         ) { uri ->
             uri?.let {
-
                 if (StrictModeManager.isLocked(this)) {
-                    Toast.makeText(this,
-                        "Strict Mode Locked! Cannot export.",
-                        Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Strict Mode Locked! Cannot export.", Toast.LENGTH_SHORT).show()
                     return@let
                 }
 
@@ -67,13 +50,8 @@ class SpecificBlockerActivity : AppCompatActivity() {
             ActivityResultContracts.OpenDocument()
         ) { uri ->
             uri?.let {
-
                 if (StrictModeManager.isLocked(this)) {
-                    Toast.makeText(
-                        this,
-                        "Strict Mode Locked! Cannot import.",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                    Toast.makeText(this, "Strict Mode Locked! Cannot import.", Toast.LENGTH_SHORT).show()
                     return@let
                 }
 
@@ -102,33 +80,22 @@ class SpecificBlockerActivity : AppCompatActivity() {
         btnExportSettings = findViewById(R.id.btnExportSettings)
         btnImportSettings = findViewById(R.id.btnImportSettings)
 
-        // ===== EXPORT BUTTON =====
         btnExportSettings.setOnClickListener {
-
             if (StrictModeManager.isLocked(this)) {
-                Toast.makeText(this,
-                    "Strict Mode Locked! Cannot export.",
-                    Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Strict Mode Locked! Cannot export.", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-
             exportLauncher.launch("ultrafocus_backup.json")
         }
 
-        // ===== IMPORT BUTTON =====
         btnImportSettings.setOnClickListener {
-
             if (StrictModeManager.isLocked(this)) {
-                Toast.makeText(this,
-                    "Strict Mode Locked! Cannot import.",
-                    Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Strict Mode Locked! Cannot import.", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-
             importLauncher.launch(arrayOf("application/json"))
         }
 
-        // ===== WEB TAB =====
         val tabContainer = btnTabScreens.parent as LinearLayout
         btnTabWeb = Button(this).apply {
             text = "Web"
@@ -137,14 +104,12 @@ class SpecificBlockerActivity : AppCompatActivity() {
         }
         tabContainer.addView(btnTabWeb)
 
-        // ===== ACCOUNTABILITY BUTTON =====
         val btnAccountability = Button(this).apply {
             text = "Set Accountability Partner (Rose)"
             setOnClickListener { showAccountabilityDialog() }
         }
         (listView.parent as LinearLayout).addView(btnAccountability, 0)
 
-        // ===== DEBUG =====
         chkDebug.isChecked = SpecificScreenManager.isDebugMode(this)
         chkDebug.setOnCheckedChangeListener { _, isChecked ->
             SpecificScreenManager.setDebugMode(this, isChecked)
@@ -283,7 +248,12 @@ class SpecificBlockerActivity : AppCompatActivity() {
             else -> emptyList()
         }
 
-        adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, list)
+        adapter = ArrayAdapter<String>(
+            this,
+            android.R.layout.simple_list_item_1,
+            list.toList()
+        )
+
         listView.adapter = adapter
     }
 }
