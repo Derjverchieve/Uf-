@@ -20,7 +20,6 @@ object WebsiteBlockManager {
 
     fun addSite(context: Context, url: String, schedule: String?) {
         val currentList = getBlockedSites(context)
-        // Store just the host if possible (e.g. "youtube.com")
         val cleanUrl = extractHost(url)
         currentList.add(cleanUrl)
 
@@ -39,6 +38,18 @@ object WebsiteBlockManager {
         editor.apply()
     }
 
+    fun clearAll(context: Context) {
+        val currentList = getBlockedSites(context)
+        val editor = getPrefs(context).edit()
+
+        currentList.forEach { site ->
+            editor.remove(PREF_SCHEDULE_PREFIX + site)
+        }
+
+        editor.remove(KEY_BLOCKED_SITES)
+        editor.apply()
+    }
+
     fun getSchedule(context: Context, url: String): String {
         return getPrefs(context).getString(PREF_SCHEDULE_PREFIX + url, "") ?: ""
     }
@@ -46,22 +57,16 @@ object WebsiteBlockManager {
     fun shouldBlockUrl(context: Context, urlDetected: String?): Boolean {
         if (urlDetected.isNullOrEmpty()) return false
 
-        // 1. Get the domain of the site the user is visiting
         val detectedHost = extractHost(urlDetected)
-
         val blockedList = getBlockedSites(context)
 
-        // 2. Check if this host matches any blocked host
         val matchedSite = blockedList.find { blockedSite ->
-            // Logic: Block if exact match OR if it's a subdomain (e.g., m.youtube.com ends with youtube.com)
             detectedHost.equals(blockedSite, ignoreCase = true) ||
                     detectedHost.endsWith(".$blockedSite", ignoreCase = true)
         } ?: return false
 
-        // 3. Check Temporary Access (Did they type the UUID?)
         if (TemporaryAccessManager.isAllowed(matchedSite)) return false
 
-        // 4. Check Schedule
         val schedule = getSchedule(context, matchedSite)
         if (schedule.isEmpty()) return true
 
@@ -76,13 +81,13 @@ object WebsiteBlockManager {
                     val start = parseTime(parts[0])
                     val end = parseTime(parts[1])
                     if (currentMinute in start..end) return true
-                } catch (e: Exception) {}
+                } catch (_: Exception) {
+                }
             }
         }
         return false
     }
 
-    // Helper: extracts "youtube.com" from "https://www.youtube.com/watch?v=..."
     private fun extractHost(url: String): String {
         var clean = url.lowercase()
         if (!clean.startsWith("http")) {
