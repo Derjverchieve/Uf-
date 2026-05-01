@@ -46,7 +46,17 @@
         android:layout_height="wrap_content"
         android:text="Debug Mode (Show Class Names)"
         android:layout_marginBottom="8dp"/>
+<Button
+    android:id="@+id/btnExportSettings"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:text="Export Settings"/>
 
+<Button
+    android:id="@+id/btnImportSettings"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:text="Import Settings"/>
     <!-- List -->
     <ListView
         android:id="@+id/listView"
