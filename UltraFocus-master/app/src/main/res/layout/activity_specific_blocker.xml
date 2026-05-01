@@ -15,12 +15,11 @@
         android:textColor="@android:color/black"
         android:layout_marginBottom="16dp"/>
 
-    <!-- Toggle Buttons -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:layout_marginBottom="16dp">
+        android:layout_marginBottom="12dp">
 
         <Button
             android:id="@+id/btnTabScreens"
@@ -36,28 +35,51 @@
             android:layout_weight="1"
             android:layout_height="wrap_content"
             android:text="Keywords"
+            android:layout_marginStart="4dp"
+            android:layout_marginEnd="4dp"/>
+
+        <Button
+            android:id="@+id/btnTabWeb"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="Web"
             android:layout_marginStart="4dp"/>
     </LinearLayout>
 
-    <!-- Debug Checkbox -->
     <CheckBox
         android:id="@+id/chkDebug"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Debug Mode (Show Class Names)"
         android:layout_marginBottom="8dp"/>
-<Button
-    android:id="@+id/btnExportSettings"
-    android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:text="Export Settings"/>
 
-<Button
-    android:id="@+id/btnImportSettings"
-    android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:text="Import Settings"/>
-    <!-- List -->
+    <Switch
+        android:id="@+id/switchDownloadBlock"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Block Downloads in Downloads folder"
+        android:layout_marginBottom="8dp"/>
+
+    <Button
+        android:id="@+id/btnGrantAllFiles"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Grant All Files Access"
+        android:layout_marginBottom="8dp"/>
+
+    <Button
+        android:id="@+id/btnExportSettings"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Export Settings"/>
+
+    <Button
+        android:id="@+id/btnImportSettings"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Import Settings"/>
+
     <ListView
         android:id="@+id/listView"
         android:layout_width="match_parent"
@@ -66,7 +88,6 @@
         android:dividerHeight="1dp"
         android:background="@android:color/white"/>
 
-    <!-- Add Button -->
     <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
         android:id="@+id/fabAdd"
         android:layout_width="wrap_content"
