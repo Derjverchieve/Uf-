@@ -35,30 +35,20 @@ object BackupManager {
                 )
             )
 
-            json.put(
-                "downloadBlockEnabled",
-                DownloadBlockPrefs.isEnabled(context)
-            )
+            json.put("downloadBlockEnabled",
+                DownloadBlockPrefs.isEnabled(context))
 
-            json.put(
-                "strictModeEnabled",
-                StrictModeManager.isLocked(context)
-            )
+            json.put("strictModeEnabled",
+                StrictModeManager.isLocked(context))
 
-            json.put(
-                "allowedApps",
-                JSONArray(KioskModeManager.getAllowedApps(context))
-            )
+            json.put("allowedApps",
+                JSONArray(KioskModeManager.getAllowedApps(context)))
 
-            json.put(
-                "accountabilityName",
-                prefs.getString("accountability_name", "")
-            )
+            json.put("accountabilityName",
+                prefs.getString("accountability_name", ""))
 
-            json.put(
-                "accountabilityPhone",
-                prefs.getString("accountability_phone", "")
-            )
+            json.put("accountabilityPhone",
+                prefs.getString("accountability_phone", ""))
 
             context.contentResolver.openOutputStream(uri)?.use {
                 it.write(json.toString(4).toByteArray())
@@ -72,11 +62,15 @@ object BackupManager {
     }
 
     fun importSettings(context: Context, uri: Uri): Boolean {
+
+        // 🔒 STRICT MODE PROTECTION (CRITICAL)
+        if (StrictModeManager.isLocked(context)) {
+            return false
+        }
+
         return try {
             val input = context.contentResolver.openInputStream(uri)
-            val text = BufferedReader(
-                InputStreamReader(input)
-            ).readText()
+            val text = BufferedReader(InputStreamReader(input)).readText()
 
             val json = JSONObject(text)
 
@@ -84,22 +78,14 @@ object BackupManager {
             SpecificScreenManager.clearAll(context)
             val screens = json.getJSONArray("blockedScreens")
             for (i in 0 until screens.length()) {
-                SpecificScreenManager.addScreen(
-                    context,
-                    screens.getString(i),
-                    null
-                )
+                SpecificScreenManager.addScreen(context, screens.getString(i), null)
             }
 
             // Keywords
             ContentBlockManager.clearAll(context)
             val keywords = json.getJSONArray("keywords")
             for (i in 0 until keywords.length()) {
-                ContentBlockManager.addKeyword(
-                    context,
-                    keywords.getString(i),
-                    null
-                )
+                ContentBlockManager.addKeyword(context, keywords.getString(i), null)
             }
 
             // Websites
@@ -116,18 +102,18 @@ object BackupManager {
                 )
             }
 
-            // Download block
+            // Download blocker
             DownloadBlockPrefs.setEnabled(
                 context,
                 json.getBoolean("downloadBlockEnabled")
             )
 
-            // Strict mode
+            // Strict mode (only re-enable, never disable)
             if (json.getBoolean("strictModeEnabled")) {
                 StrictModeManager.enableStrictMode(context)
             }
 
-            // Kiosk apps
+            // Allowed apps
             val allowed = json.getJSONArray("allowedApps")
             val allowedList = mutableSetOf<String>()
 
@@ -135,29 +121,17 @@ object BackupManager {
                 allowedList.add(allowed.getString(i))
             }
 
-            KioskModeManager.saveAllowedApps(
-                context,
-                allowedList
-            )
+            KioskModeManager.saveAllowedApps(context, allowedList)
 
             // Accountability
-            val prefs = context.getSharedPreferences(
-                PREFS,
-                Context.MODE_PRIVATE
-            )
-
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             prefs.edit()
-                .putString(
-                    "accountability_name",
-                    json.optString("accountabilityName")
-                )
-                .putString(
-                    "accountability_phone",
-                    json.optString("accountabilityPhone")
-                )
+                .putString("accountability_name", json.optString("accountabilityName"))
+                .putString("accountability_phone", json.optString("accountabilityPhone"))
                 .apply()
 
             true
+
         } catch (e: Exception) {
             e.printStackTrace()
             false
