@@ -40,6 +40,18 @@ object SpecificScreenManager {
         editor.apply()
     }
 
+    fun clearAll(context: Context) {
+        val currentList = getBlockedScreens(context)
+        val editor = getPrefs(context).edit()
+
+        currentList.forEach { screen ->
+            editor.remove(PREF_SCHEDULE_PREFIX + screen)
+        }
+
+        editor.remove(KEY_BLOCKED_SCREENS)
+        editor.apply()
+    }
+
     fun getSchedule(context: Context, screenName: String): String {
         return getPrefs(context).getString(PREF_SCHEDULE_PREFIX + screenName, "") ?: ""
     }
@@ -48,12 +60,10 @@ object SpecificScreenManager {
         if (className == null) return false
         val blocked = getBlockedScreens(context)
 
-        // Find if this screen is in the list
         val match = blocked.find { className.contains(it, ignoreCase = true) } ?: return false
 
-        // Check Schedule
         val schedule = getSchedule(context, match)
-        if (schedule.isEmpty()) return true // Block 24/7
+        if (schedule.isEmpty()) return true
 
         val now = Calendar.getInstance()
         val currentMinute = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
@@ -66,7 +76,8 @@ object SpecificScreenManager {
                     val start = parseTime(parts[0])
                     val end = parseTime(parts[1])
                     if (currentMinute in start..end) return true
-                } catch (e: Exception) { }
+                } catch (_: Exception) {
+                }
             }
         }
         return false
