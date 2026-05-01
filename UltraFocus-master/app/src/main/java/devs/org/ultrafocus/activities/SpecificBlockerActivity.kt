@@ -17,7 +17,8 @@ import devs.org.ultrafocus.utils.ContentBlockManager
 import devs.org.ultrafocus.utils.SpecificScreenManager
 import devs.org.ultrafocus.utils.StrictModeManager
 import devs.org.ultrafocus.utils.WebsiteBlockManager
-
+import androidx.activity.result.contract.ActivityResultContracts
+import devs.org.ultrafocus.utils.BackupManager
 class SpecificBlockerActivity : AppCompatActivity() {
 
     private lateinit var listView: ListView
