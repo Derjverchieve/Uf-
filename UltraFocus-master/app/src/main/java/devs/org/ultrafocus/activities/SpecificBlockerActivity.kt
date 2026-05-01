@@ -25,7 +25,8 @@ class SpecificBlockerActivity : AppCompatActivity() {
     private lateinit var fabAdd: ExtendedFloatingActionButton
     private lateinit var chkDebug: CheckBox
     private lateinit var adapter: ArrayAdapter<String>
-
+    private lateinit var btnExportSettings: Button
+    private lateinit var btnImportSettings: Button
     // UI Tabs
     private lateinit var btnTabScreens: Button
     private lateinit var btnTabKeywords: Button
