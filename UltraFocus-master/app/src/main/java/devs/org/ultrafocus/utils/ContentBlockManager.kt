@@ -8,9 +8,8 @@ import java.util.Calendar
 object ContentBlockManager {
     private const val PREF_NAME = "ContentBlockPrefs"
     private const val KEY_BLOCKED_KEYWORDS = "blocked_keywords"
-    private const val PREF_SCHEDULE_PREFIX = "sched_key_" // Storage prefix for schedules
+    private const val PREF_SCHEDULE_PREFIX = "sched_key_"
 
-    // Cache to make regex faster
     private var cachedPatterns: Map<String, Regex>? = null
 
     private fun getPrefs(context: Context): SharedPreferences {
@@ -21,7 +20,6 @@ object ContentBlockManager {
         return getPrefs(context).getStringSet(KEY_BLOCKED_KEYWORDS, mutableSetOf())?.toMutableSet() ?: mutableSetOf()
     }
 
-    // UPDATED: Now accepts a schedule string (e.g. "09:00-12:00")
     fun addKeyword(context: Context, keyword: String, schedule: String?) {
         val currentList = getKeywords(context)
         val cleanWord = keyword.trim()
@@ -29,11 +27,10 @@ object ContentBlockManager {
 
         val editor = getPrefs(context).edit()
         editor.putStringSet(KEY_BLOCKED_KEYWORDS, currentList)
-        // Save the schedule
         editor.putString(PREF_SCHEDULE_PREFIX + cleanWord, schedule ?: "")
         editor.apply()
 
-        cachedPatterns = null // Clear cache to rebuild
+        cachedPatterns = null
     }
 
     fun removeKeyword(context: Context, keyword: String) {
@@ -48,6 +45,20 @@ object ContentBlockManager {
         cachedPatterns = null
     }
 
+    fun clearAll(context: Context) {
+        val currentList = getKeywords(context)
+        val editor = getPrefs(context).edit()
+
+        currentList.forEach { keyword ->
+            editor.remove(PREF_SCHEDULE_PREFIX + keyword)
+        }
+
+        editor.remove(KEY_BLOCKED_KEYWORDS)
+        editor.apply()
+
+        cachedPatterns = null
+    }
+
     fun getSchedule(context: Context, keyword: String): String {
         return getPrefs(context).getString(PREF_SCHEDULE_PREFIX + keyword, "") ?: ""
     }
@@ -55,7 +66,6 @@ object ContentBlockManager {
     fun containsBlockedContent(context: Context, textOnScreen: String?): Boolean {
         if (textOnScreen.isNullOrEmpty()) return false
 
-        // Lazy load patterns + their schedules
         if (cachedPatterns == null) {
             val keywords = getKeywords(context)
             cachedPatterns = keywords.associateWith { keyword ->
@@ -64,24 +74,20 @@ object ContentBlockManager {
             }
         }
 
-        // 1. Find matching keywords
         val matchedKeywords = cachedPatterns!!.filter { entry ->
             entry.value.containsMatchIn(textOnScreen)
         }.keys
 
         if (matchedKeywords.isEmpty()) return false
 
-        // 2. Check Time Schedule for the matches
         val now = Calendar.getInstance()
         val currentMinute = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
 
         for (keyword in matchedKeywords) {
             val schedule = getSchedule(context, keyword)
 
-            // If empty schedule -> Block 24/7
             if (schedule.isEmpty()) return true
 
-            // Parse ranges: "09:00-12:00,14:00-16:00"
             val ranges = schedule.split(",")
             for (range in ranges) {
                 val parts = range.split("-")
@@ -89,9 +95,9 @@ object ContentBlockManager {
                     try {
                         val start = parseTime(parts[0])
                         val end = parseTime(parts[1])
-                        // If we match the text AND the time, block it
                         if (currentMinute in start..end) return true
-                    } catch (e: Exception) {}
+                    } catch (_: Exception) {
+                    }
                 }
             }
         }
