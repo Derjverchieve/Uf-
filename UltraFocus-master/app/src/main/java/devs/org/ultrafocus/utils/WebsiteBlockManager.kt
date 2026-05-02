@@ -221,6 +221,12 @@ object WebsiteBlockManager {
         }
     }
 
+    fun clearAll(context: Context) {
+        getPrefs(context).edit()
+            .remove(KEY_BLOCKED_RULES)
+            .apply()
+    }
+
     private fun saveRules(context: Context, rules: Set<WebBlockRule>) {
         getPrefs(context).edit()
             .putStringSet(KEY_BLOCKED_RULES, rules.mapTo(mutableSetOf()) { encodeRule(it) })
