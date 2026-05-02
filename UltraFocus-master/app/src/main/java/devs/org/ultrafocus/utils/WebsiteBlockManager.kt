@@ -5,99 +5,226 @@ import android.content.SharedPreferences
 import android.net.Uri
 import java.util.Calendar
 
+enum class WebBlockMode {
+    GENERAL,
+    SPECIFIC
+}
+
+data class WebBlockRule(
+    val mode: WebBlockMode,
+    val host: String,
+    val path: String = ""
+)
+
 object WebsiteBlockManager {
     private const val PREF_NAME = "WebsiteBlockPrefs"
-    private const val KEY_BLOCKED_SITES = "blocked_sites"
+    private const val KEY_BLOCKED_RULES = "blocked_web_rules"
     private const val PREF_SCHEDULE_PREFIX = "sched_web_"
 
     private fun getPrefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
     }
 
+    fun getRules(context: Context): MutableSet<WebBlockRule> {
+        val prefs = getPrefs(context)
+        val raw = prefs.getStringSet(KEY_BLOCKED_RULES, mutableSetOf())
+            ?.toMutableSet() ?: mutableSetOf()
+        val decoded = raw.mapNotNull { decodeRule(it) }.toMutableSet()
+        if (decoded.size != raw.size) saveRules(context, decoded)
+        return decoded
+    }
+
+    // Keep this for backward compat with any UI that reads host-only list
     fun getBlockedSites(context: Context): MutableSet<String> {
-        return getPrefs(context).getStringSet(KEY_BLOCKED_SITES, mutableSetOf())?.toMutableSet() ?: mutableSetOf()
+        return getRules(context)
+            .filter { it.mode == WebBlockMode.GENERAL }
+            .mapTo(mutableSetOf()) { it.host }
     }
 
-    fun addSite(context: Context, url: String, schedule: String?) {
-        val currentList = getBlockedSites(context)
-        val cleanUrl = extractHost(url)
-        currentList.add(cleanUrl)
-
-        val editor = getPrefs(context).edit()
-        editor.putStringSet(KEY_BLOCKED_SITES, currentList)
-        editor.putString(PREF_SCHEDULE_PREFIX + cleanUrl, schedule ?: "")
-        editor.apply()
-    }
-
-    fun removeSite(context: Context, url: String) {
-        val currentList = getBlockedSites(context)
-        currentList.remove(url)
-        val editor = getPrefs(context).edit()
-        editor.putStringSet(KEY_BLOCKED_SITES, currentList)
-        editor.remove(PREF_SCHEDULE_PREFIX + url)
-        editor.apply()
-    }
-
-    fun clearAll(context: Context) {
-        val currentList = getBlockedSites(context)
-        val editor = getPrefs(context).edit()
-
-        currentList.forEach { site ->
-            editor.remove(PREF_SCHEDULE_PREFIX + site)
+    fun addSite(
+        context: Context,
+        url: String,
+        schedule: String?,
+        mode: WebBlockMode = WebBlockMode.GENERAL
+    ) {
+        val rule = buildRule(url, mode) ?: return
+        val currentList = getRules(context)
+        // Remove any existing rule with same mode+host+path before adding
+        currentList.removeAll {
+            it.mode == rule.mode && it.host == rule.host && it.path == rule.path
         }
-
-        editor.remove(KEY_BLOCKED_SITES)
-        editor.apply()
+        currentList.add(rule)
+        getPrefs(context).edit()
+            .putStringSet(
+                KEY_BLOCKED_RULES,
+                currentList.mapTo(mutableSetOf()) { encodeRule(it) }
+            )
+            .putString(PREF_SCHEDULE_PREFIX + ruleKey(rule), schedule?.trim().orEmpty())
+            .apply()
     }
 
-    fun getSchedule(context: Context, url: String): String {
-        return getPrefs(context).getString(PREF_SCHEDULE_PREFIX + url, "") ?: ""
+    fun removeSite(context: Context, url: String, mode: WebBlockMode = WebBlockMode.GENERAL) {
+        val rule = buildRule(url, mode) ?: return
+        val currentList = getRules(context)
+        currentList.removeAll {
+            it.mode == rule.mode && it.host == rule.host && it.path == rule.path
+        }
+        getPrefs(context).edit()
+            .putStringSet(
+                KEY_BLOCKED_RULES,
+                currentList.mapTo(mutableSetOf()) { encodeRule(it) }
+            )
+            .remove(PREF_SCHEDULE_PREFIX + ruleKey(rule))
+            .apply()
+    }
+
+    fun getSchedule(
+        context: Context,
+        url: String,
+        mode: WebBlockMode = WebBlockMode.GENERAL
+    ): String {
+        val rule = buildRule(url, mode) ?: return ""
+        return getPrefs(context).getString(PREF_SCHEDULE_PREFIX + ruleKey(rule), "") ?: ""
     }
 
     fun shouldBlockUrl(context: Context, urlDetected: String?): Boolean {
-        if (urlDetected.isNullOrEmpty()) return false
+        if (urlDetected.isNullOrBlank()) return false
+        val detected = parseUrl(urlDetected) ?: return false
+        val detectedHost = detected.host.lowercase()
+        val detectedPath = normalizePath(detected.path)
+        val blockedRules = getRules(context)
 
-        val detectedHost = extractHost(urlDetected)
-        val blockedList = getBlockedSites(context)
+        // --- GENERAL rules: block the entire host ---
+        val generalMatch = blockedRules.firstOrNull { rule ->
+            rule.mode == WebBlockMode.GENERAL &&
+                (detectedHost.equals(rule.host, ignoreCase = true) ||
+                    detectedHost.endsWith(".${rule.host}", ignoreCase = true))
+        }
+        if (generalMatch != null) {
+            if (TemporaryAccessManager.isAllowed(generalMatch.host)) return false
+            return scheduleAllowsBlock(context, generalMatch)
+        }
 
-        val matchedSite = blockedList.find { blockedSite ->
-            detectedHost.equals(blockedSite, ignoreCase = true) ||
-                    detectedHost.endsWith(".$blockedSite", ignoreCase = true)
-        } ?: return false
+        // --- SPECIFIC rules: block the host EXCEPT the whitelisted path ---
+        val specificRulesForHost = blockedRules.filter { rule ->
+            rule.mode == WebBlockMode.SPECIFIC &&
+                (detectedHost.equals(rule.host, ignoreCase = true) ||
+                    detectedHost.endsWith(".${rule.host}", ignoreCase = true))
+        }
+        if (specificRulesForHost.isEmpty()) return false
 
-        if (TemporaryAccessManager.isAllowed(matchedSite)) return false
+        // If the current path matches a whitelisted specific rule → allow
+        val allowedBySpecificRule = specificRulesForHost.any { rule ->
+            matchesSpecificAllowRule(rule, detectedHost, detectedPath)
+        }
+        if (allowedBySpecificRule) return false
 
-        val schedule = getSchedule(context, matchedSite)
+        // Current path is NOT in the whitelist → block
+        val hostKey = specificRulesForHost.first().host
+        if (TemporaryAccessManager.isAllowed(hostKey)) return false
+        return scheduleAllowsBlock(context, specificRulesForHost.first())
+    }
+
+    // Extracted host string for use in throttling keys
+    fun normalizeHost(urlDetected: String): String {
+        return parseUrl(urlDetected)?.host?.lowercase() ?: urlDetected.lowercase()
+    }
+
+    private fun scheduleAllowsBlock(context: Context, rule: WebBlockRule): Boolean {
+        val schedule = getSchedule(context, rule.host + rule.path, rule.mode)
         if (schedule.isEmpty()) return true
-
         val now = Calendar.getInstance()
         val currentMinute = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
-        val ranges = schedule.split(",")
-
-        for (range in ranges) {
+        for (range in schedule.split(",")) {
             val parts = range.split("-")
             if (parts.size == 2) {
                 try {
                     val start = parseTime(parts[0])
                     val end = parseTime(parts[1])
                     if (currentMinute in start..end) return true
-                } catch (_: Exception) {
-                }
+                } catch (_: Exception) {}
             }
         }
         return false
     }
 
-    private fun extractHost(url: String): String {
-        var clean = url.lowercase()
-        if (!clean.startsWith("http")) {
+    private fun matchesSpecificAllowRule(
+        rule: WebBlockRule,
+        detectedHost: String,
+        detectedPath: String
+    ): Boolean {
+        if (!detectedHost.equals(rule.host, ignoreCase = true) &&
+            !detectedHost.endsWith(".${rule.host}", ignoreCase = true)) return false
+        val rulePath = normalizePath(rule.path)
+        if (rulePath.isBlank() || rulePath == "/") return true
+        val path = if (detectedPath.isBlank()) "/" else detectedPath
+        return path == rulePath || path.startsWith(rulePath.trimEnd('/') + "/")
+    }
+
+    private fun buildRule(url: String, mode: WebBlockMode): WebBlockRule? {
+        val parsed = parseUrl(url) ?: return null
+        val host = parsed.host.lowercase()
+        if (host.isBlank()) return null
+        return when (mode) {
+            WebBlockMode.GENERAL -> WebBlockRule(mode = mode, host = host, path = "")
+            WebBlockMode.SPECIFIC -> WebBlockRule(
+                mode = mode,
+                host = host,
+                path = normalizePath(parsed.path)
+            )
+        }
+    }
+
+    private data class ParsedUrl(val host: String, val path: String)
+
+    private fun parseUrl(url: String): ParsedUrl? {
+        var clean = url.trim()
+        if (clean.isBlank()) return null
+        if (!clean.startsWith("http://") && !clean.startsWith("https://")) {
             clean = "https://$clean"
         }
+        val uri = try { Uri.parse(clean) } catch (_: Exception) { null } ?: return null
+        val host = uri.host?.trim().orEmpty().removePrefix("www.").lowercase()
+        if (host.isBlank()) return null
+        return ParsedUrl(host = host, path = normalizePath(uri.path))
+    }
+
+    private fun normalizePath(path: String?): String {
+        val p = path?.trim().orEmpty()
+        if (p.isBlank()) return ""
+        return if (p.startsWith("/")) p else "/$p"
+    }
+
+    private fun encodeRule(rule: WebBlockRule): String {
+        val path = rule.path.replace("|", "%7C")
+        return "${rule.mode.name}|${rule.host}|$path"
+    }
+
+    private fun decodeRule(raw: String): WebBlockRule? {
+        val parts = raw.split("|")
+        if (parts.size < 2) return null
         return try {
-            Uri.parse(clean).host ?: url.lowercase()
-        } catch (e: Exception) {
-            url.lowercase()
+            val mode = WebBlockMode.valueOf(parts[0])
+            val host = parts[1].trim().lowercase()
+            val path = if (parts.size >= 3)
+                parts.drop(2).joinToString("|").replace("%7C", "|")
+            else ""
+            if (host.isBlank()) null
+            else WebBlockRule(mode = mode, host = host, path = normalizePath(path))
+        } catch (_: Exception) { null }
+    }
+
+    private fun ruleKey(rule: WebBlockRule): String {
+        return when (rule.mode) {
+            WebBlockMode.GENERAL -> rule.host
+            WebBlockMode.SPECIFIC -> rule.host + rule.path
         }
+    }
+
+    private fun saveRules(context: Context, rules: Set<WebBlockRule>) {
+        getPrefs(context).edit()
+            .putStringSet(KEY_BLOCKED_RULES, rules.mapTo(mutableSetOf()) { encodeRule(it) })
+            .apply()
     }
 
     private fun parseTime(t: String): Int {
