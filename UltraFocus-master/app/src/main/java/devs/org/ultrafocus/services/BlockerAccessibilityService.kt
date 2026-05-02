@@ -154,10 +154,14 @@ class BlockerAccessibilityService : AccessibilityService() {
                 val rootNode = rootInActiveWindow ?: event.source
                 if (rootNode != null) {
                     if (browserPackages.contains(packageName)) {
-                        // FIX: pass packageName so we can target the right address bar
                         if (scanForBlockedUrls(rootNode, packageName)) return
                     }
-                    if (scanForBlockedContent(rootNode)) {
+                    // SELF-BLOCKING FIX: rootInActiveWindow is NOT always the same
+                    // package as event.packageName. A system event can fire while
+                    // UF's own window is active, causing the scanner to read UF's
+                    // keyword list and block UF itself. Check root window's package.
+                    val rootPkg = rootNode.packageName?.toString().orEmpty()
+                    if (rootPkg != this.packageName && scanForBlockedContent(rootNode)) {
                         performBlock(packageName)
                         return
                     }
@@ -167,6 +171,9 @@ class BlockerAccessibilityService : AccessibilityService() {
 
         // 5. Activity & app blocker
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            // Never block UF's own activities regardless of class name matches
+            if (packageName == this.packageName) return
+
             if (className.isNotEmpty() &&
                 SpecificScreenManager.isScreenBlocked(this, className)) {
                 performBlock(packageName)
@@ -328,6 +335,8 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     private fun performBlock(packageName: String) {
+        // Never block UltraFocus itself under any circumstance
+        if (packageName == this.packageName) return
         if (TemporaryAccessManager.isAllowed(packageName)) return
         try {
             val currentTime = System.currentTimeMillis()
