@@ -6,7 +6,6 @@
     android:background="@color/material_dynamic_neutral10"
     android:padding="16dp">
 
-    <!-- Title -->
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -14,14 +13,15 @@
         android:textSize="24sp"
         android:textStyle="bold"
         android:textColor="@android:color/black"
-        android:layout_marginBottom="16dp"/>
+        android:layout_marginBottom="8dp"/>
 
-    <!-- Tabs -->
+    <!-- Tab Buttons — Web is defined here in XML, NOT added programmatically -->
     <LinearLayout
+        android:id="@+id/tabContainer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:layout_marginBottom="12dp">
+        android:layout_marginBottom="8dp">
 
         <Button
             android:id="@+id/btnTabScreens"
@@ -29,75 +29,68 @@
             android:layout_weight="1"
             android:layout_height="wrap_content"
             android:text="Screens"
-            android:layout_marginEnd="4dp"/>
+            android:layout_marginEnd="2dp"/>
 
         <Button
             android:id="@+id/btnTabKeywords"
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="wrap_content"
-            android:text="Keywords"
-            android:layout_marginStart="4dp"
-            android:layout_marginEnd="4dp"/>
+            android:layout_marginHorizontal="2dp"
+            android:text="Keywords"/>
 
         <Button
             android:id="@+id/btnTabWeb"
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="wrap_content"
-            android:text="Web"
-            android:layout_marginStart="4dp"/>
+            android:layout_marginStart="2dp"
+            android:text="Web"/>
+
     </LinearLayout>
 
-    <!-- Debug -->
+    <!-- Debug Checkbox -->
     <CheckBox
         android:id="@+id/chkDebug"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Debug Mode (Show Class Names)"
-        android:layout_marginBottom="8dp"/>
-
-    <!-- 🔥 Web Mode Toggle (RESTORED) -->
-    <Switch
-        android:id="@+id/switchWebMode"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Specific Mode (Allow only selected pages)"
-        android:layout_marginBottom="8dp"/>
-
-    <!-- Download Block -->
-    <Switch
-        android:id="@+id/switchDownloadBlock"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Block Downloads in Downloads folder"
-        android:layout_marginBottom="8dp"/>
-
-    <!-- Permission -->
-    <Button
-        android:id="@+id/btnGrantAllFiles"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Grant All Files Access"
-        android:layout_marginBottom="8dp"/>
-
-    <!-- Export -->
-    <Button
-        android:id="@+id/btnExportSettings"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Export Settings"
         android:layout_marginBottom="4dp"/>
 
-    <!-- Import -->
-    <Button
-        android:id="@+id/btnImportSettings"
+    <!-- Export / Import -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Import Settings"
+        android:orientation="horizontal"
+        android:layout_marginBottom="4dp">
+
+        <Button
+            android:id="@+id/btnExportSettings"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="Export"
+            android:layout_marginEnd="2dp"/>
+
+        <Button
+            android:id="@+id/btnImportSettings"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="2dp"
+            android:text="Import"/>
+
+    </LinearLayout>
+
+    <!-- Accountability Partner -->
+    <Button
+        android:id="@+id/btnAccountability"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Set Accountability Partner (Rose)"
         android:layout_marginBottom="8dp"/>
 
-    <!-- List -->
+    <!-- Blocked Items List -->
     <ListView
         android:id="@+id/listView"
         android:layout_width="match_parent"
@@ -115,4 +108,5 @@
         android:layout_gravity="end"
         android:layout_marginTop="16dp"
         android:backgroundTint="@color/design_default_color_primary"/>
+
 </LinearLayout>
