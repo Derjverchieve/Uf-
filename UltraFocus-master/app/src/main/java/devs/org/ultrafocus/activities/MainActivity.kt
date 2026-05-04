@@ -366,3 +366,42 @@ class MainActivity : AppCompatActivity() {
             .create().show()
     }
 }
+private fun setupDownloadBlockingUI() {
+
+    val switch = findViewById<android.widget.Switch>(R.id.switchDownloadBlock)
+    val strictBtn = findViewById<android.widget.Button>(R.id.btnDownloadStrict)
+    val statusText = findViewById<android.widget.TextView>(R.id.txtDownloadStrictStatus)
+
+    // Initial state
+    switch.isChecked = DownloadBlockPrefs.isEnabled(this)
+    statusText.text = DownloadBlockPrefs.getStatusText(this)
+
+    switch.setOnCheckedChangeListener { _, isChecked ->
+
+        if (!isChecked) {
+            // 🚨 STRICT MODE CHECK
+            if (DownloadBlockPrefs.isLocked(this)) {
+                android.widget.Toast.makeText(
+                    this,
+                    "Strict mode active — cannot disable yet",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+
+                switch.isChecked = true
+                return@setOnCheckedChangeListener
+            }
+        }
+
+        DownloadBlockPrefs.setEnabled(this, isChecked)
+
+        if (isChecked) {
+            startService(Intent(this, DownloadBlockService::class.java))
+        } else {
+            stopService(Intent(this, DownloadBlockService::class.java))
+        }
+    }
+
+    strictBtn.setOnClickListener {
+        showStrictModeDialog(statusText)
+    }
+}
