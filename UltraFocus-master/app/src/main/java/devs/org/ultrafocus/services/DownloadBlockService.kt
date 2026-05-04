@@ -16,10 +16,10 @@ import java.io.File
 
 /**
  * Foreground service that watches the Downloads directory.
- * Every time a file is created or moved into the folder, it is deleted
+ * Every time a file is created or moved into the folder it is deleted
  * immediately — as long as this service is running.
  *
- * Requires MANAGE_EXTERNAL_STORAGE on Android 11+ (already declared in manifest).
+ * Requires MANAGE_EXTERNAL_STORAGE on Android 11+ (already in manifest).
  * Start/stop this service from MainActivity when the user toggles the switch.
  */
 class DownloadBlockService : Service() {
@@ -36,8 +36,6 @@ class DownloadBlockService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // If the service is restarted by the OS, update the pref so MainActivity
-        // knows the correct state on next resume.
         DownloadBlockPrefs.setEnabled(this, true)
         return START_STICKY
     }
@@ -55,26 +53,29 @@ class DownloadBlockService : Service() {
         val downloadsDir = Environment.getExternalStoragePublicDirectory(
             Environment.DIRECTORY_DOWNLOADS
         )
-
-        // Make sure the directory exists before watching
         if (!downloadsDir.exists()) downloadsDir.mkdirs()
 
-        // FileObserver constructor differs between API levels
+        // Compute the event mask BEFORE constructing the FileObserver so Kotlin
+        // can resolve the Int type unambiguously (avoids BigInteger.or() confusion).
+        // FileObserver constants must be qualified with the class name in Kotlin;
+        // they are NOT automatically inherited inside anonymous object bodies.
+        val mask: Int = FileObserver.IN_CREATE or FileObserver.MOVED_TO or FileObserver.CLOSE_WRITE
+
         fileObserver = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            object : FileObserver(downloadsDir, IN_CREATE or MOVED_TO or CLOSE_WRITE) {
+            // API 29+: constructor accepts a File
+            object : FileObserver(downloadsDir, mask) {
                 override fun onEvent(event: Int, path: String?) {
                     if (path == null) return
-                    val file = File(downloadsDir, path)
-                    deleteQuietly(file)
+                    deleteQuietly(File(downloadsDir, path))
                 }
             }
         } else {
+            // Pre-API 29: constructor accepts a String path (deprecated but required)
             @Suppress("DEPRECATION")
-            object : FileObserver(downloadsDir.absolutePath, IN_CREATE or MOVED_TO or CLOSE_WRITE) {
+            object : FileObserver(downloadsDir.absolutePath, mask) {
                 override fun onEvent(event: Int, path: String?) {
                     if (path == null) return
-                    val file = File(downloadsDir.absolutePath, path)
-                    deleteQuietly(file)
+                    deleteQuietly(File(downloadsDir.absolutePath, path))
                 }
             }
         }
@@ -83,15 +84,14 @@ class DownloadBlockService : Service() {
     }
 
     /**
-     * Delete a file silently. Retries once after a short sleep in case the
-     * download manager still has the file open during IN_CREATE.
+     * Delete a file silently. Retries once after 300 ms in case the download
+     * manager still has the file open at the moment of IN_CREATE.
      */
     private fun deleteQuietly(file: File) {
         try {
             if (file.exists()) {
                 val deleted = file.delete()
                 if (!deleted) {
-                    // Retry after 300ms — download manager may still be writing
                     Thread.sleep(300)
                     file.delete()
                 }
