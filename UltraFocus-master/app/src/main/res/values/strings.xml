@@ -25,4 +25,8 @@
         Rest assured, all accessibility data stays securely on your device—we never share or transmit your data, ensuring your privacy is always protected.
         \n\n
     </string>
+
+    <!-- Download blocker -->
+    <string name="block_downloads">Block Downloads</string>
+    <string name="block_downloads_description">When enabled, any file saved to your Downloads folder is deleted instantly.</string>
 </resources>
