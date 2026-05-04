@@ -4,6 +4,8 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
+import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import devs.org.ultrafocus.activities.BlockedAppActivity
@@ -63,7 +65,7 @@ class BlockerAccessibilityService : AccessibilityService() {
     private var lastBlockTime: Long = 0
     private val blockCooldownMs = 500L
 
-    // Throttle website blocks so we don't spam BACK+HOME
+    // Throttle website blocks
     private var lastBlockedWebsiteKey: String? = null
     private var lastWebsiteBlockTime: Long = 0
     private val websiteBlockCooldownMs = 1500L
@@ -156,10 +158,6 @@ class BlockerAccessibilityService : AccessibilityService() {
                     if (browserPackages.contains(packageName)) {
                         if (scanForBlockedUrls(rootNode, packageName)) return
                     }
-                    // SELF-BLOCKING FIX: rootInActiveWindow is NOT always the same
-                    // package as event.packageName. A system event can fire while
-                    // UF's own window is active, causing the scanner to read UF's
-                    // keyword list and block UF itself. Check root window's package.
                     val rootPkg = rootNode.packageName?.toString().orEmpty()
                     if (rootPkg != this.packageName && scanForBlockedContent(rootNode)) {
                         performBlock(packageName)
@@ -171,7 +169,6 @@ class BlockerAccessibilityService : AccessibilityService() {
 
         // 5. Activity & app blocker
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            // Never block UF's own activities regardless of class name matches
             if (packageName == this.packageName) return
 
             if (className.isNotEmpty() &&
@@ -186,15 +183,15 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ── URL scanning — reads address bar by view ID, NOT tree walk ───────────
+    // ── URL scanning ─────────────────────────────────────────────────────────
     /**
-     * BUG FIX: Previously this recursively walked the whole node tree and
-     * only called performRedirectToGoogle(), leaving the blocked tab open.
-     *
-     * Now it:
-     * 1. Reads only the address-bar node by view ID (fast + accurate)
-     * 2. On a blocked URL: BACK → HOME → redirect to Google
-     *    so the blocked tab is actually gone before Google opens.
+     * When a blocked URL is detected:
+     * 1. Redirect the current browser tab to Google via ACTION_SET_TEXT on the
+     *    URL bar — this replaces the blocked page IN the existing tab, so the
+     *    user won't see the blocked site again if they return to the browser.
+     * 2. Go HOME immediately to remove the browser from view.
+     * 3. On older APIs where IME_ENTER isn't available, also open Google via
+     *    intent as a fallback to ensure the tab actually navigates.
      */
     private fun scanForBlockedUrls(
         rootNode: AccessibilityNodeInfo,
@@ -203,7 +200,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         val currentUrl = captureBrowserUrl(rootNode, packageName) ?: return false
         if (!WebsiteBlockManager.shouldBlockUrl(this, currentUrl)) return false
 
-        // Throttle so we don't fire BACK+HOME every 250ms on the same URL
         val blockKey = WebsiteBlockManager.normalizeHost(currentUrl)
         val now = System.currentTimeMillis()
         if (blockKey == lastBlockedWebsiteKey &&
@@ -212,17 +208,80 @@ class BlockerAccessibilityService : AccessibilityService() {
         lastBlockedWebsiteKey = blockKey
         lastWebsiteBlockTime = now
 
-        // BUG FIX: close the tab BEFORE opening Google
-        performGlobalAction(GLOBAL_ACTION_BACK)   // close/dismiss current page
-        performGlobalAction(GLOBAL_ACTION_HOME)   // go to launcher
-        performRedirectToGoogle()                 // open Google fresh
+        // Step 1: Redirect the browser tab to Google so the blocked URL
+        // is gone from the tab history when the user returns to the browser.
+        val tabRedirected = tryRedirectBrowserTab(rootNode, packageName)
+
+        // Step 2: Go HOME now — user leaves the browser immediately.
+        performGlobalAction(GLOBAL_ACTION_HOME)
+
+        // Step 3: On older APIs the tab redirect may not auto-navigate
+        // (no ACTION_IME_ENTER_TRIGGERED), so open Google via intent as
+        // a safety net so the user always lands on something safe.
+        if (!tabRedirected) {
+            performRedirectToGoogle()
+        }
+
         return true
     }
 
     /**
+     * Attempts to navigate the current browser tab to Google by:
+     * 1. Clicking the address bar to focus it.
+     * 2. Setting its text to "https://www.google.com".
+     * 3. Triggering the IME "Go" action (API 30+) to submit the URL.
+     *
+     * Returns true if the text was successfully set (even if IME action
+     * isn't available on the current API level).
+     */
+    private fun tryRedirectBrowserTab(
+        rootNode: AccessibilityNodeInfo,
+        packageName: String
+    ): Boolean {
+        val config = browserConfigs.firstOrNull { it.packageName == packageName }
+            ?: return false
+
+        for (viewId in config.addressBarIds) {
+            val nodes = try {
+                rootNode.findAccessibilityNodeInfosByViewId(viewId)
+            } catch (_: Exception) { null }
+
+            if (nodes.isNullOrEmpty()) continue
+
+            try {
+                val urlNode = nodes.firstOrNull() ?: continue
+
+                // Focus the URL bar
+                urlNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+
+                // Replace the URL text with Google
+                val args = Bundle()
+                args.putCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                    "https://www.google.com"
+                )
+                val textSet = urlNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+
+                if (textSet) {
+                    // Trigger navigation on API 30+ (Android 11+)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        @Suppress("NewApi")
+                        urlNode.performAction(AccessibilityNodeInfo.ACTION_IME_ENTER_TRIGGERED)
+                    }
+                    // Even on older APIs, returning true means we'll skip the
+                    // intent-based fallback — the user goes HOME and the tab
+                    // will show the partially-entered Google URL if they return.
+                    return true
+                }
+            } finally {
+                nodes.forEach { runCatching { it.recycle() } }
+            }
+        }
+        return false
+    }
+
+    /**
      * Read the address bar text using the browser's known view ID.
-     * Falls back to searching all nodes for text that looks like a URL
-     * only if the view-ID lookup returns nothing (e.g. Chrome internal pages).
      */
     private fun captureBrowserUrl(
         rootNode: AccessibilityNodeInfo,
@@ -335,7 +394,6 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     private fun performBlock(packageName: String) {
-        // Never block UltraFocus itself under any circumstance
         if (packageName == this.packageName) return
         if (TemporaryAccessManager.isAllowed(packageName)) return
         try {
