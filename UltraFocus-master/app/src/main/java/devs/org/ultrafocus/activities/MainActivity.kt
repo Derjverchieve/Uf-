@@ -405,3 +405,35 @@ private fun setupDownloadBlockingUI() {
         showStrictModeDialog(statusText)
     }
 }
+
+private fun showStrictModeDialog(statusText: android.widget.TextView) {
+
+    val options = arrayOf("1 hour", "6 hours", "12 hours", "24 hours", "Disable")
+
+    android.app.AlertDialog.Builder(this)
+        .setTitle("Download Blocking Strict Mode")
+        .setItems(options) { _, which ->
+
+            when (which) {
+                0 -> DownloadBlockPrefs.setStrictMode(this, 1)
+                1 -> DownloadBlockPrefs.setStrictMode(this, 6)
+                2 -> DownloadBlockPrefs.setStrictMode(this, 12)
+                3 -> DownloadBlockPrefs.setStrictMode(this, 24)
+                4 -> {
+                    if (DownloadBlockPrefs.isLocked(this)) {
+                        android.widget.Toast.makeText(
+                            this,
+                            "Cannot disable — strict mode active",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                        return@setItems
+                    }
+                    DownloadBlockPrefs.clearStrictMode(this)
+                }
+            }
+
+            statusText.text = DownloadBlockPrefs.getStatusText(this)
+        }
+        .setNegativeButton("Cancel", null)
+        .show()
+}
