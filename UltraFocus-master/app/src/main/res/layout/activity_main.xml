@@ -149,3 +149,22 @@
         android:id="@+id/recyclerView"/>
 
 </LinearLayout>
+
+<Switch
+    android:id="@+id/switchDownloadBlock"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:text="Enable Download Blocking" />
+
+<Button
+    android:id="@+id/btnDownloadStrict"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:text="Set Strict Mode" />
+
+<TextView
+    android:id="@+id/txtDownloadStrictStatus"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:text="Status"
+    android:textSize="14sp" />
