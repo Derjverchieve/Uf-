@@ -30,6 +30,8 @@ import devs.org.ultrafocus.model.AppInfo
 import devs.org.ultrafocus.repository.AppRepository
 import devs.org.ultrafocus.services.BlockerAccessibilityService
 import devs.org.ultrafocus.services.DeviceAdmin
+import devs.org.ultrafocus.services.DownloadBlockService
+import devs.org.ultrafocus.utils.DownloadBlockPrefs
 import devs.org.ultrafocus.viewModel.MainViewModel
 import devs.org.ultrafocus.viewModel.factory.MainModelFactory
 import kotlinx.coroutines.launch
@@ -67,12 +69,14 @@ class MainActivity : AppCompatActivity() {
         clickListeners()
         loadSelectedApps()
         updateFocusSwitchState()
+        updateDownloadBlockSwitchState()
     }
 
     override fun onResume() {
         super.onResume()
         loadSelectedApps()
         updateFocusSwitchState()
+        updateDownloadBlockSwitchState()
     }
 
     private fun checkOverlayPermission() {
@@ -81,6 +85,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateFocusSwitchState() {
         binding.focusSwitch.isChecked = isAccessibilityServiceEnabled()
+    }
+
+    private fun updateDownloadBlockSwitchState() {
+        // Mirror the persisted pref — the service sets it to false on destroy,
+        // so this correctly reflects reality after a reboot or force-stop.
+        binding.downloadBlockSwitch.isChecked = DownloadBlockPrefs.isEnabled(this)
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
@@ -169,6 +179,11 @@ class MainActivity : AppCompatActivity() {
             true
         }
 
+        // Download block switch
+        binding.downloadBlockSwitch.setOnCheckedChangeListener { _, isChecked ->
+            handleDownloadBlockToggle(isChecked)
+        }
+
         // Time period button
         binding.btnAddTimePeriod.setOnClickListener {
             showGlobalTimeDialog()
@@ -181,6 +196,54 @@ class MainActivity : AppCompatActivity() {
                 true
             } else false
         }
+    }
+
+    // ── Download blocking ─────────────────────────────────────────────────────
+
+    private fun handleDownloadBlockToggle(enable: Boolean) {
+        if (enable) {
+            // Need All Files Access on Android 11+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                !Environment.isExternalStorageManager()) {
+                // Snap the switch back — permission not granted yet
+                binding.downloadBlockSwitch.isChecked = false
+                showDownloadPermissionDialog()
+                return
+            }
+            startDownloadBlockService()
+        } else {
+            stopDownloadBlockService()
+        }
+    }
+
+    private fun startDownloadBlockService() {
+        DownloadBlockPrefs.setEnabled(this, true)
+        val intent = Intent(this, DownloadBlockService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+        Toast.makeText(this, "Download blocking enabled.", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun stopDownloadBlockService() {
+        DownloadBlockPrefs.setEnabled(this, false)
+        stopService(Intent(this, DownloadBlockService::class.java))
+        Toast.makeText(this, "Download blocking disabled.", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showDownloadPermissionDialog() {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("All Files Access Required")
+            .setMessage(
+                "Download blocking needs \"All Files Access\" permission to watch " +
+                "and delete files in the Downloads folder.\n\n" +
+                "Tap Grant to open the permission screen, then enable it for UltraFocus."
+            )
+            .setPositiveButton("Grant") { _, _ -> grantAllFilesAccess() }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     // ── Dialogs ──────────────────────────────────────────────────────────────
@@ -225,10 +288,6 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    /**
-     * Settings dialog — replaces the old global strict mode dialog.
-     * Accessible via the toolbar settings gear icon.
-     */
     private fun showSettingsDialog() {
         val items = arrayOf(
             "Grant All Files Access",
@@ -260,7 +319,6 @@ class MainActivity : AppCompatActivity() {
                     }
                     startActivity(intent)
                 } catch (e: Exception) {
-                    // Fallback to general manage all files screen
                     startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
                 }
             }
