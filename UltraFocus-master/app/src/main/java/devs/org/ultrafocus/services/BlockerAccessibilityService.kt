@@ -4,7 +4,6 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -186,12 +185,12 @@ class BlockerAccessibilityService : AccessibilityService() {
     // ── URL scanning ─────────────────────────────────────────────────────────
     /**
      * When a blocked URL is detected:
-     * 1. Redirect the current browser tab to Google via ACTION_SET_TEXT on the
-     *    URL bar — this replaces the blocked page IN the existing tab, so the
-     *    user won't see the blocked site again if they return to the browser.
-     * 2. Go HOME immediately to remove the browser from view.
-     * 3. On older APIs where IME_ENTER isn't available, also open Google via
-     *    intent as a fallback to ensure the tab actually navigates.
+     * 1. Try to overwrite the URL bar text with Google via ACTION_SET_TEXT.
+     *    This clears the blocked URL from the tab so the user won't see it
+     *    if they return to the browser (the tab now shows Google).
+     * 2. Go HOME immediately.
+     * 3. Open Google via intent — works regardless of whether step 1 succeeded,
+     *    and ensures the user always lands on a safe page.
      */
     private fun scanForBlockedUrls(
         rootNode: AccessibilityNodeInfo,
@@ -208,38 +207,28 @@ class BlockerAccessibilityService : AccessibilityService() {
         lastBlockedWebsiteKey = blockKey
         lastWebsiteBlockTime = now
 
-        // Step 1: Redirect the browser tab to Google so the blocked URL
-        // is gone from the tab history when the user returns to the browser.
-        val tabRedirected = tryRedirectBrowserTab(rootNode, packageName)
+        // Step 1: rewrite the URL bar so the blocked page is replaced in-tab.
+        tryRedirectBrowserTab(rootNode, packageName)
 
-        // Step 2: Go HOME now — user leaves the browser immediately.
+        // Step 2: go HOME — removes browser from view immediately.
         performGlobalAction(GLOBAL_ACTION_HOME)
 
-        // Step 3: On older APIs the tab redirect may not auto-navigate
-        // (no ACTION_IME_ENTER_TRIGGERED), so open Google via intent as
-        // a safety net so the user always lands on something safe.
-        if (!tabRedirected) {
-            performRedirectToGoogle()
-        }
+        // Step 3: open Google via intent so the user lands on something safe.
+        performRedirectToGoogle()
 
         return true
     }
 
     /**
-     * Attempts to navigate the current browser tab to Google by:
-     * 1. Clicking the address bar to focus it.
-     * 2. Setting its text to "https://www.google.com".
-     * 3. Triggering the IME "Go" action (API 30+) to submit the URL.
-     *
-     * Returns true if the text was successfully set (even if IME action
-     * isn't available on the current API level).
+     * Writes "https://www.google.com" into the browser's address bar using
+     * ACTION_SET_TEXT so the blocked URL is gone from the tab.
+     * Navigation itself is handled by the intent in step 3 of scanForBlockedUrls.
      */
     private fun tryRedirectBrowserTab(
         rootNode: AccessibilityNodeInfo,
         packageName: String
-    ): Boolean {
-        val config = browserConfigs.firstOrNull { it.packageName == packageName }
-            ?: return false
+    ) {
+        val config = browserConfigs.firstOrNull { it.packageName == packageName } ?: return
 
         for (viewId in config.addressBarIds) {
             val nodes = try {
@@ -250,34 +239,18 @@ class BlockerAccessibilityService : AccessibilityService() {
 
             try {
                 val urlNode = nodes.firstOrNull() ?: continue
-
-                // Focus the URL bar
                 urlNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-
-                // Replace the URL text with Google
                 val args = Bundle()
                 args.putCharSequence(
                     AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
                     "https://www.google.com"
                 )
-                val textSet = urlNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-
-                if (textSet) {
-                    // Trigger navigation on API 30+ (Android 11+)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        @Suppress("NewApi")
-                        urlNode.performAction(AccessibilityNodeInfo.ACTION_IME_ENTER_TRIGGERED)
-                    }
-                    // Even on older APIs, returning true means we'll skip the
-                    // intent-based fallback — the user goes HOME and the tab
-                    // will show the partially-entered Google URL if they return.
-                    return true
-                }
+                urlNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                return
             } finally {
                 nodes.forEach { runCatching { it.recycle() } }
             }
         }
-        return false
     }
 
     /**
