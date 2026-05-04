@@ -1,4 +1,3 @@
-// main/java/devs/org/ultrafocus/utils/DownloadBlockPrefs.kt
 package devs.org.ultrafocus.utils
 
 import android.content.Context
