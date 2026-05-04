@@ -14,14 +14,6 @@ import devs.org.ultrafocus.R
 import devs.org.ultrafocus.utils.DownloadBlockPrefs
 import java.io.File
 
-/**
- * Foreground service that watches the Downloads directory.
- * Every time a file is created or moved into the folder it is deleted
- * immediately — as long as this service is running.
- *
- * Requires MANAGE_EXTERNAL_STORAGE on Android 11+ (already in manifest).
- * Start/stop this service from MainActivity when the user toggles the switch.
- */
 class DownloadBlockService : Service() {
 
     private var fileObserver: FileObserver? = null
@@ -35,6 +27,105 @@ class DownloadBlockService : Service() {
         startWatching()
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        DownloadBlockPrefs.setEnabled(this, true)
+        return START_STICKY
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        fileObserver?.stopWatching()
+        fileObserver = null
+        DownloadBlockPrefs.setEnabled(this, false)
+    }
+
+    // ── File watcher ─────────────────────────────────────────────────────────
+
+    private fun startWatching() {
+        val downloadsDir = Environment.getExternalStoragePublicDirectory(
+            Environment.DIRECTORY_DOWNLOADS
+        )
+        if (!downloadsDir.exists()) downloadsDir.mkdirs()
+
+        // ✅ FIX: force explicit Int typing to avoid BigInteger inference
+        val mask = (
+            FileObserver.CREATE or
+            FileObserver.MOVED_TO or
+            FileObserver.CLOSE_WRITE
+        ).toInt()
+
+        fileObserver = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            object : FileObserver(downloadsDir, mask) {
+                override fun onEvent(event: Int, path: String?) {
+                    if (path == null) return
+
+                    // ✅ Extra safety: only act on relevant events
+                    if (event and (FileObserver.CREATE or FileObserver.MOVED_TO or FileObserver.CLOSE_WRITE) != 0) {
+                        deleteQuietly(File(downloadsDir, path))
+                    }
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            object : FileObserver(downloadsDir.absolutePath, mask) {
+                override fun onEvent(event: Int, path: String?) {
+                    if (path == null) return
+
+                    if (event and (FileObserver.CREATE or FileObserver.MOVED_TO or FileObserver.CLOSE_WRITE) != 0) {
+                        deleteQuietly(File(downloadsDir.absolutePath, path))
+                    }
+                }
+            }
+        }
+
+        fileObserver?.startWatching()
+    }
+
+    private fun deleteQuietly(file: File) {
+        try {
+            if (file.exists()) {
+                val deleted = file.delete()
+                if (!deleted) {
+                    Thread.sleep(300)
+                    file.delete()
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    // ── Notification ─────────────────────────────────────────────────────────
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Download Blocker",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Shown while download blocking is active"
+                setShowBadge(false)
+            }
+            getSystemService(NotificationManager::class.java)
+                ?.createNotificationChannel(channel)
+        }
+    }
+
+    private fun buildNotification(): Notification {
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Download Blocking Active")
+            .setContentText("New downloads are deleted automatically.")
+            .setSmallIcon(R.drawable.ic_delete)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
+            .setSilent(true)
+            .build()
+    }
+
+    companion object {
+        const val NOTIFICATION_ID = 1002
+        const val CHANNEL_ID = "download_block_channel"
+    }
+}
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         DownloadBlockPrefs.setEnabled(this, true)
         return START_STICKY
