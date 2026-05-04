@@ -43,6 +43,7 @@ class MainActivity : AppCompatActivity() {
     private var handler = Handler(Looper.getMainLooper())
     private var list = mutableListOf<AppInfo>()
     private lateinit var options: ActivityOptionsCompat
+    private var ignoreDownloadToggleCallback = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,6 +71,7 @@ class MainActivity : AppCompatActivity() {
         loadSelectedApps()
         updateFocusSwitchState()
         updateDownloadBlockSwitchState()
+        updateDownloadStrictStateText()
     }
 
     override fun onResume() {
@@ -77,10 +79,10 @@ class MainActivity : AppCompatActivity() {
         loadSelectedApps()
         updateFocusSwitchState()
         updateDownloadBlockSwitchState()
+        updateDownloadStrictStateText()
     }
 
     private fun checkOverlayPermission() {
-        // Overlay permission nag is optional — keeping it commented by choice
     }
 
     private fun updateFocusSwitchState() {
@@ -88,9 +90,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateDownloadBlockSwitchState() {
-        // Mirror the persisted pref — the service sets it to false on destroy,
-        // so this correctly reflects reality after a reboot or force-stop.
+        ignoreDownloadToggleCallback = true
         binding.downloadBlockSwitch.isChecked = DownloadBlockPrefs.isEnabled(this)
+        ignoreDownloadToggleCallback = false
+    }
+
+    private fun updateDownloadStrictStateText() {
+        binding.downloadBlockSwitch.contentDescription = DownloadBlockPrefs.getStatusText(this)
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
@@ -148,18 +154,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun clickListeners() {
-        // Add apps
         binding.btnAddApps.setOnClickListener {
             startActivity(Intent(this, SelectAppActivity::class.java))
         }
 
-        // Long-press add apps → advanced blocker (screens / keywords / websites)
         binding.btnAddApps.setOnLongClickListener {
             startActivity(Intent(this, SpecificBlockerActivity::class.java))
             true
         }
 
-        // Focus switch
         binding.focusSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked) {
                 if (!isAccessibilityServiceEnabled()) showMaterialDialog()
@@ -173,23 +176,25 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Long-press focus switch → device admin (anti-uninstall)
         binding.focusSwitch.setOnLongClickListener {
             askForDeviceAdmin()
             true
         }
 
-        // Download block switch
         binding.downloadBlockSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (ignoreDownloadToggleCallback) return@setOnCheckedChangeListener
             handleDownloadBlockToggle(isChecked)
         }
 
-        // Time period button
+        binding.downloadBlockSwitch.setOnLongClickListener {
+            showDownloadStrictModeDialog()
+            true
+        }
+
         binding.btnAddTimePeriod.setOnClickListener {
             showGlobalTimeDialog()
         }
 
-        // Toolbar settings icon → permissions & settings
         binding.toolbar.setOnMenuItemClickListener { menuItem ->
             if (menuItem.itemId == R.id.done) {
                 showSettingsDialog()
@@ -198,15 +203,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── Download blocking ─────────────────────────────────────────────────────
-
     private fun handleDownloadBlockToggle(enable: Boolean) {
+        if (!enable && DownloadBlockPrefs.isLocked(this)) {
+            Toast.makeText(
+                this,
+                "Download blocking is locked by strict mode.",
+                Toast.LENGTH_SHORT
+            ).show()
+            ignoreDownloadToggleCallback = true
+            binding.downloadBlockSwitch.isChecked = true
+            ignoreDownloadToggleCallback = false
+            return
+        }
+
         if (enable) {
-            // Need All Files Access on Android 11+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-                !Environment.isExternalStorageManager()) {
-                // Snap the switch back — permission not granted yet
+                !Environment.isExternalStorageManager()
+            ) {
+                ignoreDownloadToggleCallback = true
                 binding.downloadBlockSwitch.isChecked = false
+                ignoreDownloadToggleCallback = false
                 showDownloadPermissionDialog()
                 return
             }
@@ -214,6 +230,8 @@ class MainActivity : AppCompatActivity() {
         } else {
             stopDownloadBlockService()
         }
+
+        updateDownloadStrictStateText()
     }
 
     private fun startDownloadBlockService() {
@@ -238,15 +256,49 @@ class MainActivity : AppCompatActivity() {
             .setTitle("All Files Access Required")
             .setMessage(
                 "Download blocking needs \"All Files Access\" permission to watch " +
-                "and delete files in the Downloads folder.\n\n" +
-                "Tap Grant to open the permission screen, then enable it for UltraFocus."
+                    "and delete files in the Downloads folder.\n\n" +
+                    "Tap Grant to open the permission screen, then enable it for UltraFocus."
             )
             .setPositiveButton("Grant") { _, _ -> grantAllFilesAccess() }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    // ── Dialogs ──────────────────────────────────────────────────────────────
+    private fun showDownloadStrictModeDialog() {
+        val items = arrayOf(
+            "1 hour",
+            "6 hours",
+            "12 hours",
+            "24 hours",
+            "Disable strict mode"
+        )
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Download Blocking Strict Mode")
+            .setMessage(DownloadBlockPrefs.getStatusText(this))
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> DownloadBlockPrefs.setStrictMode(this, 1)
+                    1 -> DownloadBlockPrefs.setStrictMode(this, 6)
+                    2 -> DownloadBlockPrefs.setStrictMode(this, 12)
+                    3 -> DownloadBlockPrefs.setStrictMode(this, 24)
+                    4 -> {
+                        if (DownloadBlockPrefs.isLocked(this)) {
+                            Toast.makeText(
+                                this,
+                                "Strict mode is active and cannot be disabled yet.",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            return@setItems
+                        }
+                        DownloadBlockPrefs.clearStrictMode(this)
+                    }
+                }
+                updateDownloadStrictStateText()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
 
     private fun showGlobalTimeDialog() {
         val input = EditText(this)
@@ -365,75 +417,4 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton(getString(R.string.cancel)) { _, _ -> }
             .create().show()
     }
-}
-private fun setupDownloadBlockingUI() {
-
-    val switch = findViewById<android.widget.Switch>(R.id.switchDownloadBlock)
-    val strictBtn = findViewById<android.widget.Button>(R.id.btnDownloadStrict)
-    val statusText = findViewById<android.widget.TextView>(R.id.txtDownloadStrictStatus)
-
-    // Initial state
-    switch.isChecked = DownloadBlockPrefs.isEnabled(this)
-    statusText.text = DownloadBlockPrefs.getStatusText(this)
-
-    switch.setOnCheckedChangeListener { _, isChecked ->
-
-        if (!isChecked) {
-            // 🚨 STRICT MODE CHECK
-            if (DownloadBlockPrefs.isLocked(this)) {
-                android.widget.Toast.makeText(
-                    this,
-                    "Strict mode active — cannot disable yet",
-                    android.widget.Toast.LENGTH_SHORT
-                ).show()
-
-                switch.isChecked = true
-                return@setOnCheckedChangeListener
-            }
-        }
-
-        DownloadBlockPrefs.setEnabled(this, isChecked)
-
-        if (isChecked) {
-            startService(Intent(this, DownloadBlockService::class.java))
-        } else {
-            stopService(Intent(this, DownloadBlockService::class.java))
-        }
-    }
-
-    strictBtn.setOnClickListener {
-        showStrictModeDialog(statusText)
-    }
-}
-
-private fun showStrictModeDialog(statusText: android.widget.TextView) {
-
-    val options = arrayOf("1 hour", "6 hours", "12 hours", "24 hours", "Disable")
-
-    android.app.AlertDialog.Builder(this)
-        .setTitle("Download Blocking Strict Mode")
-        .setItems(options) { _, which ->
-
-            when (which) {
-                0 -> DownloadBlockPrefs.setStrictMode(this, 1)
-                1 -> DownloadBlockPrefs.setStrictMode(this, 6)
-                2 -> DownloadBlockPrefs.setStrictMode(this, 12)
-                3 -> DownloadBlockPrefs.setStrictMode(this, 24)
-                4 -> {
-                    if (DownloadBlockPrefs.isLocked(this)) {
-                        android.widget.Toast.makeText(
-                            this,
-                            "Cannot disable — strict mode active",
-                            android.widget.Toast.LENGTH_SHORT
-                        ).show()
-                        return@setItems
-                    }
-                    DownloadBlockPrefs.clearStrictMode(this)
-                }
-            }
-
-            statusText.text = DownloadBlockPrefs.getStatusText(this)
-        }
-        .setNegativeButton("Cancel", null)
-        .show()
 }
