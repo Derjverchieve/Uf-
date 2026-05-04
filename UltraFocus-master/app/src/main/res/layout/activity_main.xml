@@ -9,124 +9,189 @@
     tools:context=".activities.MainActivity">
 
     <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
         android:layout_width="match_parent"
         android:layout_height="?attr/actionBarSize"
-        app:title="@string/app_name"
-        android:id="@+id/toolbar"
-        android:background="@android:color/transparent"/>
+        android:background="@android:color/transparent"
+        app:title="@string/app_name" />
 
-    <!-- ── Focus Mode card ─────────────────────────────────────────────── -->
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginHorizontal="18dp"
         android:layout_marginVertical="8dp"
         app:cardCornerRadius="10dp">
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:padding="15dp"
-            android:orientation="vertical">
+            android:orientation="vertical"
+            android:padding="15dp">
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/enable_focus_mode"
                 android:padding="4dp"
-                android:textStyle="bold"
-                android:textSize="20sp"/>
+                android:text="@string/enable_focus_mode"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:padding="4dp"
                 android:text="@string/if_you_enable_focus_mode_your_selected_app_will_not_be_opened"
-                android:textSize="14sp"/>
+                android:textSize="14sp" />
+
             <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/focusSwitch"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_gravity="end"
-                android:id="@+id/focusSwitch"/>
+                android:layout_gravity="end" />
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
-    <!-- ── Download Blocker card ───────────────────────────────────────── -->
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginHorizontal="18dp"
         android:layout_marginVertical="8dp"
         app:cardCornerRadius="10dp">
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:padding="15dp"
-            android:orientation="vertical">
+            android:orientation="vertical"
+            android:padding="15dp">
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/block_downloads"
                 android:padding="4dp"
-                android:textStyle="bold"
-                android:textSize="20sp"/>
+                android:text="@string/block_downloads"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:padding="4dp"
                 android:text="@string/block_downloads_description"
-                android:textSize="14sp"/>
+                android:textSize="14sp" />
+
             <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/downloadBlockSwitch"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_gravity="end"
-                android:id="@+id/downloadBlockSwitch"/>
+                android:layout_gravity="end" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnDownloadStrict"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="Set Download Strict Mode" />
+
+            <TextView
+                android:id="@+id/txtDownloadStrictStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Download strict mode status"
+                android:textSize="14sp" />
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
-    <!-- ── Add Apps card ──────────────────────────────────────────────── -->
     <com.google.android.material.card.MaterialCardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginHorizontal="18dp"
         android:layout_marginVertical="8dp"
         app:cardCornerRadius="10dp">
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:padding="15dp"
-            android:orientation="vertical">
+            android:orientation="vertical"
+            android:padding="15dp">
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/add_apps_to_focus_list"
                 android:padding="4dp"
-                android:textStyle="bold"
-                android:textSize="20sp"/>
+                android:text="Strict Mode"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="4dp"
+                android:text="Manage per-item strict mode for blocked apps, websites, keywords, and screens."
+                android:textSize="14sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnOpenStrictMode"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="Open Strict Mode" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="18dp"
+        android:layout_marginVertical="8dp"
+        app:cardCornerRadius="10dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="15dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="4dp"
+                android:text="@string/add_apps_to_focus_list"
+                android:textSize="20sp"
+                android:textStyle="bold" />
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:padding="4dp"
                 android:text="@string/select_apps_message"
-                android:textSize="14sp"/>
+                android:textSize="14sp" />
+
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal">
+
                 <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnAddTimePeriod"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_gravity="start"
-                    android:layout_weight="1"
                     android:layout_marginEnd="4dp"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:text="@string/add_time_period"
-                    android:id="@+id/btnAddTimePeriod"/>
+                    android:layout_weight="1"
+                    android:text="@string/add_time_period" />
+
                 <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnAddApps"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_gravity="end"
                     android:layout_marginStart="4dp"
                     android:layout_weight="1"
-                    android:text="@string/add_apps"
-                    android:id="@+id/btnAddApps"/>
+                    android:text="@string/add_apps" />
             </LinearLayout>
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
@@ -134,37 +199,18 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="@string/selected_apps_list"
-        android:textSize="16sp"
-        android:textStyle="bold"
         android:layout_marginHorizontal="18dp"
         android:layout_marginTop="20dp"
-        android:layout_marginBottom="4dp"/>
+        android:layout_marginBottom="4dp"
+        android:text="@string/selected_apps_list"
+        android:textSize="16sp"
+        android:textStyle="bold" />
 
     <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/recyclerView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:layout_marginHorizontal="18dp"
-        tools:listitem="@layout/selected_app_item"
-        android:id="@+id/recyclerView"/>
+        tools:listitem="@layout/selected_app_item" />
 
 </LinearLayout>
-
-<Switch
-    android:id="@+id/switchDownloadBlock"
-    android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:text="Enable Download Blocking" />
-
-<Button
-    android:id="@+id/btnDownloadStrict"
-    android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:text="Set Strict Mode" />
-
-<TextView
-    android:id="@+id/txtDownloadStrictStatus"
-    android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:text="Status"
-    android:textSize="14sp" />
