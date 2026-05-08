@@ -24,7 +24,6 @@ class SpecificBlockerActivity : AppCompatActivity() {
     private lateinit var btnImportSettings: Button
     private lateinit var btnAccountability: Button
 
-    // All three tab buttons are now in the XML — no programmatic creation needed
     private lateinit var btnTabScreens: Button
     private lateinit var btnTabKeywords: Button
     private lateinit var btnTabWeb: Button
@@ -36,7 +35,11 @@ class SpecificBlockerActivity : AppCompatActivity() {
     ) { uri ->
         uri?.let {
             val ok = BackupManager.exportSettings(this, it)
-            Toast.makeText(this, if (ok) "Export successful" else "Export failed", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                if (ok) "Export successful" else "Export failed",
+                Toast.LENGTH_SHORT
+            ).show()
         }
     }
 
@@ -45,7 +48,11 @@ class SpecificBlockerActivity : AppCompatActivity() {
     ) { uri ->
         uri?.let {
             val ok = BackupManager.importSettings(this, it)
-            Toast.makeText(this, if (ok) "Import successful" else "Import failed", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                if (ok) "Import successful" else "Import failed",
+                Toast.LENGTH_SHORT
+            ).show()
             refreshList()
         }
     }
@@ -54,23 +61,20 @@ class SpecificBlockerActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_specific_blocker)
 
-        // Bind views — Web tab now comes from XML, not created here
-        listView         = findViewById(R.id.listView)
-        btnTabScreens    = findViewById(R.id.btnTabScreens)
-        btnTabKeywords   = findViewById(R.id.btnTabKeywords)
-        btnTabWeb        = findViewById(R.id.btnTabWeb)
-        fabAdd           = findViewById(R.id.fabAdd)
-        chkDebug         = findViewById(R.id.chkDebug)
+        listView          = findViewById(R.id.listView)
+        btnTabScreens     = findViewById(R.id.btnTabScreens)
+        btnTabKeywords    = findViewById(R.id.btnTabKeywords)
+        btnTabWeb         = findViewById(R.id.btnTabWeb)
+        fabAdd            = findViewById(R.id.fabAdd)
+        chkDebug          = findViewById(R.id.chkDebug)
         btnExportSettings = findViewById(R.id.btnExportSettings)
         btnImportSettings = findViewById(R.id.btnImportSettings)
         btnAccountability = findViewById(R.id.btnAccountability)
 
-        // Tab clicks
         btnTabScreens.setOnClickListener  { switchTab(0) }
         btnTabKeywords.setOnClickListener { switchTab(1) }
         btnTabWeb.setOnClickListener      { switchTab(2) }
 
-        // Export / import
         btnExportSettings.setOnClickListener {
             exportLauncher.launch("ultrafocus_backup.json")
         }
@@ -78,19 +82,15 @@ class SpecificBlockerActivity : AppCompatActivity() {
             importLauncher.launch(arrayOf("application/json"))
         }
 
-        // Accountability partner
         btnAccountability.setOnClickListener { showAccountabilityDialog() }
 
-        // Debug mode toggle
         chkDebug.isChecked = SpecificScreenManager.isDebugMode(this)
         chkDebug.setOnCheckedChangeListener { _, isChecked ->
             SpecificScreenManager.setDebugMode(this, isChecked)
         }
 
-        // FAB — add new item
         fabAdd.setOnClickListener { showAddDialog() }
 
-        // List item click — delete with per-item strict mode check
         listView.setOnItemClickListener { _, _, position, _ ->
             val itemRaw = adapter.getItem(position) ?: return@setOnItemClickListener
             handleItemDelete(extractItemKey(itemRaw))
@@ -99,7 +99,7 @@ class SpecificBlockerActivity : AppCompatActivity() {
         switchTab(0)
     }
 
-    // ── Delete flow with per-item strict mode ────────────────────────────────
+    // ── Delete flow with per-item strict mode ─────────────────────────────────
 
     private fun handleItemDelete(itemKey: String) {
         if (ItemStrictModeManager.isLocked(this, itemKey)) {
@@ -147,19 +147,16 @@ class SpecificBlockerActivity : AppCompatActivity() {
             .setView(statusText)
 
         when {
-            // Timer not started yet
             reqTime == 0L -> builder.setPositiveButton("Request Unlock") { _, _ ->
                 TypeToAccessDialog.show(this, "Verify to start unlock timer") {
                     ItemStrictModeManager.requestUnlock(this, itemKey)
                     Toast.makeText(this, "Unlock timer started!", Toast.LENGTH_SHORT).show()
                 }
             }
-            // Timer running but not done
             ItemStrictModeManager.isLocked(this, itemKey) -> builder.setNegativeButton("Cancel Request") { _, _ ->
                 ItemStrictModeManager.cancelRequest(this, itemKey)
                 Toast.makeText(this, "Request cancelled.", Toast.LENGTH_SHORT).show()
             }
-            // Timer done — allow delete
             else -> builder.setPositiveButton("Delete Now") { _, _ ->
                 deleteItem(itemKey)
                 ItemStrictModeManager.clearItem(this, itemKey)
@@ -180,7 +177,7 @@ class SpecificBlockerActivity : AppCompatActivity() {
         }
     }
 
-    // ── Add dialog with optional per-item strict mode ────────────────────────
+    // ── Add dialog ────────────────────────────────────────────────────────────
 
     private fun showAddDialog() {
         val layout = LinearLayout(this).apply {
@@ -229,18 +226,33 @@ class SpecificBlockerActivity : AppCompatActivity() {
                 if (text.isEmpty()) return@setPositiveButton
 
                 when (currentTab) {
-                    0 -> SpecificScreenManager.addScreen(this, text, schedule)
-                    1 -> ContentBlockManager.addKeyword(this, text, schedule)
-                    2 -> WebsiteBlockManager.addSite(this, text, schedule)
+                    0 -> {
+                        SpecificScreenManager.addScreen(this, text, schedule)
+                        if (strictHours > 0) ItemStrictModeManager.setStrictMode(this, text, strictHours)
+                    }
+                    1 -> {
+                        ContentBlockManager.addKeyword(this, text, schedule)
+                        if (strictHours > 0) ItemStrictModeManager.setStrictMode(this, text, strictHours)
+                    }
+                    2 -> {
+                        WebsiteBlockManager.addSite(this, text, schedule)
+                        // Bug fix: WebsiteBlockManager normalizes the URL to a host key
+                        // (strips www., lowercases, etc.). We must use that same normalized
+                        // host as the ItemStrictModeManager key, otherwise the lock icon
+                        // in refreshList() will never appear because the keys won't match.
+                        if (strictHours > 0) {
+                            val normalizedKey = WebsiteBlockManager.normalizeHost(text)
+                            ItemStrictModeManager.setStrictMode(this, normalizedKey, strictHours)
+                        }
+                    }
                 }
-                if (strictHours > 0) ItemStrictModeManager.setStrictMode(this, text, strictHours)
                 refreshList()
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private fun showAccountabilityDialog() {
         val layout = LinearLayout(this).apply {
