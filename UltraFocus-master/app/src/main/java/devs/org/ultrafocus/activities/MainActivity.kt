@@ -31,6 +31,7 @@ import devs.org.ultrafocus.repository.AppRepository
 import devs.org.ultrafocus.services.BlockerAccessibilityService
 import devs.org.ultrafocus.services.DeviceAdmin
 import devs.org.ultrafocus.services.DownloadBlockService
+import devs.org.ultrafocus.services.WatchdogService
 import devs.org.ultrafocus.utils.DownloadBlockPrefs
 import devs.org.ultrafocus.viewModel.MainViewModel
 import devs.org.ultrafocus.viewModel.factory.MainModelFactory
@@ -43,6 +44,9 @@ class MainActivity : AppCompatActivity() {
     private var handler = Handler(Looper.getMainLooper())
     private var list = mutableListOf<AppInfo>()
     private lateinit var options: ActivityOptionsCompat
+
+    // Guards against the downloadBlockSwitch listener firing when we
+    // programmatically toggle the switch during state sync.
     private var ignoreDownloadToggleCallback = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -66,7 +70,10 @@ class MainActivity : AppCompatActivity() {
         val factory = MainModelFactory(repository)
         viewModel = factory.create(MainViewModel::class.java)
 
-        checkOverlayPermission()
+        // Bug fix: WatchdogService was never started anywhere in the codebase.
+        // Start it here so breach detection and DegradedModeActivity work.
+        startWatchdogService()
+
         clickListeners()
         loadSelectedApps()
         updateFocusSwitchState()
@@ -82,8 +89,22 @@ class MainActivity : AppCompatActivity() {
         updateDownloadStrictStateText()
     }
 
-    private fun checkOverlayPermission() {
+    // ── WatchdogService ───────────────────────────────────────────────────────
+
+    private fun startWatchdogService() {
+        try {
+            val intent = Intent(this, WatchdogService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+        } catch (_: Exception) {
+            // WatchdogService handles its own foreground-start failures gracefully
+        }
     }
+
+    // ── State sync ────────────────────────────────────────────────────────────
 
     private fun updateFocusSwitchState() {
         binding.focusSwitch.isChecked = isAccessibilityServiceEnabled()
@@ -95,74 +116,26 @@ class MainActivity : AppCompatActivity() {
         ignoreDownloadToggleCallback = false
     }
 
+    // Bug fix: was setting binding.downloadBlockSwitch.contentDescription (invisible
+    // screen-reader text) instead of the visible txtDownloadStrictStatus TextView.
     private fun updateDownloadStrictStateText() {
-        binding.downloadBlockSwitch.contentDescription = DownloadBlockPrefs.getStatusText(this)
+        binding.txtDownloadStrictStatus.text = DownloadBlockPrefs.getStatusText(this)
     }
 
-    private fun isAccessibilityServiceEnabled(): Boolean {
-        val expectedComponent =
-            "${packageName}/devs.org.ultrafocus.services.BlockerAccessibilityService"
-        val enabledServices = Settings.Secure.getString(
-            contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        )
-        return !TextUtils.isEmpty(enabledServices) &&
-            enabledServices.split(":").any {
-                it.equals(expectedComponent, ignoreCase = true)
-            }
-    }
-
-    private fun openAccessibilityServiceScreen(cls: Class<*>) {
-        try {
-            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-            val componentName = ComponentName(this, cls)
-            intent.putExtra(":settings:fragment_args_key", componentName.flattenToString())
-            val bundle = Bundle()
-            bundle.putString(":settings:fragment_args_key", componentName.flattenToString())
-            intent.putExtra(":settings:show_fragment_args", bundle)
-            startActivity(intent, options.toBundle())
-        } catch (e: Exception) {
-            e.printStackTrace()
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-        }
-    }
-
-    private fun loadSelectedApps() {
-        handler.post {
-            lifecycleScope.launch {
-                list.clear()
-                list = viewModel.getBlockedApps()
-                setAdapter()
-            }
-        }
-    }
-
-    @SuppressLint("NotifyDataSetChanged")
-    private fun setAdapter() {
-        val adapter = SelectedAppsAdapter(this, list)
-        binding.recyclerView.layoutManager = LinearLayoutManager(this)
-        binding.recyclerView.adapter = adapter
-
-        adapter.setOnItemRemovedListener { appInfo ->
-            lifecycleScope.launch {
-                if (appInfo != null) viewModel.removeBlockedApp(appInfo)
-            }
-        }
-
-        adapter.setOnSetTimePeriodListener { appInfo ->
-            showTimePeriodDialogForApp(appInfo)
-        }
-    }
+    // ── Click listeners ───────────────────────────────────────────────────────
 
     private fun clickListeners() {
+
+        // Add apps (long-press → advanced blocker)
         binding.btnAddApps.setOnClickListener {
             startActivity(Intent(this, SelectAppActivity::class.java))
         }
-
         binding.btnAddApps.setOnLongClickListener {
             startActivity(Intent(this, SpecificBlockerActivity::class.java))
             true
         }
 
+        // Focus mode switch
         binding.focusSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked) {
                 if (!isAccessibilityServiceEnabled()) showMaterialDialog()
@@ -175,26 +148,35 @@ class MainActivity : AppCompatActivity() {
                 binding.focusSwitch.isChecked = isAccessibilityServiceEnabled()
             }
         }
-
         binding.focusSwitch.setOnLongClickListener {
             askForDeviceAdmin()
             true
         }
 
+        // Download block switch
         binding.downloadBlockSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (ignoreDownloadToggleCallback) return@setOnCheckedChangeListener
             handleDownloadBlockToggle(isChecked)
         }
 
-        binding.downloadBlockSwitch.setOnLongClickListener {
+        // Bug fix: btnDownloadStrict had no click listener — dead button.
+        // Wire it to the strict mode dialog (same as long-pressing the switch).
+        binding.btnDownloadStrict.setOnClickListener {
             showDownloadStrictModeDialog()
-            true
         }
 
+        // Bug fix: btnOpenStrictMode had no click listener — dead button.
+        // Wire it to SpecificBlockerActivity where per-item strict mode is managed.
+        binding.btnOpenStrictMode.setOnClickListener {
+            startActivity(Intent(this, SpecificBlockerActivity::class.java))
+        }
+
+        // Time period (global schedule)
         binding.btnAddTimePeriod.setOnClickListener {
             showGlobalTimeDialog()
         }
 
+        // Toolbar settings menu
         binding.toolbar.setOnMenuItemClickListener { menuItem ->
             if (menuItem.itemId == R.id.done) {
                 showSettingsDialog()
@@ -202,6 +184,8 @@ class MainActivity : AppCompatActivity() {
             } else false
         }
     }
+
+    // ── Download blocking ─────────────────────────────────────────────────────
 
     private fun handleDownloadBlockToggle(enable: Boolean) {
         if (!enable && DownloadBlockPrefs.isLocked(this)) {
@@ -250,6 +234,8 @@ class MainActivity : AppCompatActivity() {
         stopService(Intent(this, DownloadBlockService::class.java))
         Toast.makeText(this, "Download blocking disabled.", Toast.LENGTH_SHORT).show()
     }
+
+    // ── Dialogs ───────────────────────────────────────────────────────────────
 
     private fun showDownloadPermissionDialog() {
         MaterialAlertDialogBuilder(this)
@@ -360,17 +346,20 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    // ── Permissions ───────────────────────────────────────────────────────────
+
     private fun grantAllFilesAccess() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (Environment.isExternalStorageManager()) {
                 Toast.makeText(this, "All Files Access already granted.", Toast.LENGTH_SHORT).show()
             } else {
                 try {
-                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                        data = Uri.parse("package:$packageName")
-                    }
-                    startActivity(intent)
-                } catch (e: Exception) {
+                    startActivity(
+                        Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                            data = Uri.parse("package:$packageName")
+                        }
+                    )
+                } catch (_: Exception) {
                     startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
                 }
             }
@@ -385,11 +374,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun grantDrawOverlayPermission() {
         if (!Settings.canDrawOverlays(this)) {
-            val intent = Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:$packageName")
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
             )
-            startActivity(intent)
         } else {
             Toast.makeText(this, "Draw Over Other Apps already granted.", Toast.LENGTH_SHORT).show()
         }
@@ -397,14 +387,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun askForDeviceAdmin() {
         val componentName = ComponentName(this, DeviceAdmin::class.java)
-        val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
-            putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, componentName)
-            putExtra(
-                DevicePolicyManager.EXTRA_ADD_EXPLANATION,
-                "Prevents uninstallation while blocking."
-            )
-        }
-        startActivity(intent)
+        startActivity(
+            Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, componentName)
+                putExtra(
+                    DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                    "Prevents uninstallation while blocking."
+                )
+            }
+        )
     }
 
     private fun showMaterialDialog() {
@@ -416,5 +407,62 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton(getString(R.string.cancel)) { _, _ -> }
             .create().show()
+    }
+
+    // ── Accessibility helpers ─────────────────────────────────────────────────
+
+    private fun isAccessibilityServiceEnabled(): Boolean {
+        val expectedComponent =
+            "${packageName}/devs.org.ultrafocus.services.BlockerAccessibilityService"
+        val enabledServices = Settings.Secure.getString(
+            contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        )
+        return !TextUtils.isEmpty(enabledServices) &&
+            enabledServices.split(":").any {
+                it.equals(expectedComponent, ignoreCase = true)
+            }
+    }
+
+    private fun openAccessibilityServiceScreen(cls: Class<*>) {
+        try {
+            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            val componentName = ComponentName(this, cls)
+            intent.putExtra(":settings:fragment_args_key", componentName.flattenToString())
+            val bundle = Bundle()
+            bundle.putString(":settings:fragment_args_key", componentName.flattenToString())
+            intent.putExtra(":settings:show_fragment_args", bundle)
+            startActivity(intent, options.toBundle())
+        } catch (_: Exception) {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+    }
+
+    // ── RecyclerView ──────────────────────────────────────────────────────────
+
+    private fun loadSelectedApps() {
+        handler.post {
+            lifecycleScope.launch {
+                list.clear()
+                list = viewModel.getBlockedApps()
+                setAdapter()
+            }
+        }
+    }
+
+    @SuppressLint("NotifyDataSetChanged")
+    private fun setAdapter() {
+        val adapter = SelectedAppsAdapter(this, list)
+        binding.recyclerView.layoutManager = LinearLayoutManager(this)
+        binding.recyclerView.adapter = adapter
+
+        adapter.setOnItemRemovedListener { appInfo ->
+            lifecycleScope.launch {
+                if (appInfo != null) viewModel.removeBlockedApp(appInfo)
+            }
+        }
+
+        adapter.setOnSetTimePeriodListener { appInfo ->
+            showTimePeriodDialogForApp(appInfo)
+        }
     }
 }
