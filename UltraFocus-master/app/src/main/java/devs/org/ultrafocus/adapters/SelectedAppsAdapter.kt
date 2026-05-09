@@ -45,7 +45,6 @@ class SelectedAppsAdapter(
                 Glide.with(context).load(appInfo.icon).into(binding.icon)
             } catch (_: Exception) {}
 
-            // App name — show lock icon if strictly locked
             val isStrictLocked = ItemStrictModeManager.isLocked(context, appInfo.packageName)
             val isStrictEnabled = ItemStrictModeManager.isEnabled(context, appInfo.packageName)
             binding.label.text = when {
@@ -54,7 +53,6 @@ class SelectedAppsAdapter(
                 else            -> appInfo.appName
             }
 
-            // Schedule subtitle
             val schedule = appInfo.fromTime ?: ""
             if (schedule.isNotEmpty()) {
                 binding.timePeriodInfo.text = "Schedule: $schedule"
@@ -70,19 +68,16 @@ class SelectedAppsAdapter(
 
                 val app = list[pos]
 
-                // Check per-item strict mode
                 if (ItemStrictModeManager.isLocked(context, app.packageName)) {
                     showItemStrictModeDialog(app)
                     return@setOnClickListener
                 }
 
-                // No lock — confirm and remove
                 list.removeAt(pos)
                 notifyItemRemoved(pos)
                 onItemRemovedCallback?.invoke(app)
             }
 
-            // Long-press delete → set/manage strict mode for this app
             binding.delete.setOnLongClickListener {
                 showStrictModeSetupDialog(appInfo)
                 true
@@ -93,7 +88,6 @@ class SelectedAppsAdapter(
                 onSetTimePeriodCallback?.invoke(appInfo)
             }
 
-            // Long-press timer → also opens strict mode (discoverable via both buttons)
             binding.btnSetTimePeriod.setOnLongClickListener {
                 showStrictModeSetupDialog(appInfo)
                 true
@@ -158,6 +152,15 @@ class SelectedAppsAdapter(
         // ── Per-item strict mode — setup dialog (long-press) ─────────────────
         private fun showStrictModeSetupDialog(appInfo: AppInfo) {
             val key = appInfo.packageName
+
+            // BUG FIX: If strict mode is currently active and locked, the user must go
+            // through the proper unlock flow — they cannot edit the delay value directly.
+            // Previously, entering 0 here called clearItem() and bypassed the lock entirely.
+            if (ItemStrictModeManager.isLocked(context, key)) {
+                showItemStrictModeDialog(appInfo)
+                return
+            }
+
             val currentHours = ItemStrictModeManager.getHours(context, key)
 
             val layout = LinearLayout(context).apply {
@@ -188,6 +191,9 @@ class SelectedAppsAdapter(
                 .setPositiveButton("Save") { _, _ ->
                     val hours = hoursInput.text.toString().toIntOrNull() ?: 0
                     if (hours <= 0) {
+                        // Only reachable when NOT locked (guard is at the top of this function),
+                        // so clearing is safe here — the user is just disabling strict mode
+                        // before it was ever activated.
                         ItemStrictModeManager.clearItem(context, key)
                         Toast.makeText(context, "Strict mode removed for ${appInfo.appName}", Toast.LENGTH_SHORT).show()
                     } else {
