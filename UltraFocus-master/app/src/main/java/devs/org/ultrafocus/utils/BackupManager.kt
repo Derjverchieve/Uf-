@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import devs.org.ultrafocus.database.AppDatabase
 import devs.org.ultrafocus.model.AppInfo
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -33,22 +34,20 @@ object BackupManager {
             val json = JSONObject()
 
             // ── Blocked apps ──────────────────────────────────────────────────
-            // Access the DB synchronously — this is a user-initiated one-shot action
-            // on a small table so blocking the main thread briefly is acceptable.
-            val blockedApps = runBlocking {
-                AppDatabase.getDatabase(context).blockedAppDao().getAll()
-                    .let { flow ->
-                        // getAll() returns a Flow; collect its first emission
-                        kotlinx.coroutines.flow.first(flow)
-                    }
+            // getAll() returns a Flow<List<AppInfo>>. We collect its first emission
+            // synchronously via runBlocking — this is a user-initiated one-shot
+            // action on a small table so blocking briefly is acceptable.
+            val blockedApps: List<AppInfo> = runBlocking {
+                AppDatabase.getDatabase(context).blockedAppDao().getAll().first()
             }
+
             val appsArray = JSONArray()
             for (app in blockedApps) {
                 appsArray.put(JSONObject().apply {
                     put("packageName", app.packageName)
                     put("appName",     app.appName)
-                    put("fromTime",    app.fromTime  ?: "")
-                    put("toTime",      app.toTime    ?: "")
+                    put("fromTime",    app.fromTime   ?: "")
+                    put("toTime",      app.toTime     ?: "")
                     put("repeatMode",  app.repeatMode ?: "")
                     put("blockedAt",   app.blockedAt)
                     put("isBlocked",   app.isBlocked)
@@ -70,16 +69,21 @@ object BackupManager {
             json.put("screens", screenArray)
 
             // ── Download block state ──────────────────────────────────────────
+            // getRequestTimestamp() is the real method name in DownloadBlockPrefs
             json.put("downloadBlock", JSONObject().apply {
-                put("enabled",      DownloadBlockPrefs.isEnabled(context))
-                put("strictHours",  DownloadBlockPrefs.getStrictHours(context))
-                put("strictReq",    DownloadBlockPrefs.getStrictRequestTimestamp(context))
+                put("enabled",     DownloadBlockPrefs.isEnabled(context))
+                put("strictHours", DownloadBlockPrefs.getStrictHours(context))
+                put("strictReq",   DownloadBlockPrefs.getRequestTimestamp(context))
             })
 
             // ── Per-item strict mode ──────────────────────────────────────────
-            val strictPrefs = context.getSharedPreferences("ItemStrictModePrefs", Context.MODE_PRIVATE)
-            val strictJson  = JSONObject()
-            strictPrefs.all.forEach { (k, v) -> strictJson.put(k, v) }
+            val strictPrefs = context.getSharedPreferences(
+                "ItemStrictModePrefs", Context.MODE_PRIVATE
+            )
+            val strictJson = JSONObject()
+            for ((k, v) in strictPrefs.all) {
+                strictJson.put(k, v)
+            }
             json.put("itemStrictMode", strictJson)
 
             // ── Write to file ─────────────────────────────────────────────────
@@ -109,11 +113,11 @@ object BackupManager {
             json.optJSONArray("blockedApps")?.let { arr ->
                 for (i in 0 until arr.length()) {
                     val item        = arr.getJSONObject(i)
-                    val packageName = item.optString("packageName").takeIf { it.isNotBlank() }
-                        ?: continue
+                    val packageName = item.optString("packageName")
+                        .takeIf { it.isNotBlank() } ?: continue
 
-                    // Re-derive the app icon from PackageManager.
-                    // If the app is no longer installed, skip it — there is nothing to block.
+                    // Re-derive the icon from PackageManager.
+                    // Skip apps that are no longer installed — nothing to block.
                     val appIcon = try {
                         pm.getApplicationIcon(packageName)
                     } catch (_: PackageManager.NameNotFoundException) {
@@ -122,8 +126,11 @@ object BackupManager {
 
                     val appName = item.optString("appName")
                         .takeIf { it.isNotBlank() }
-                        ?: try { pm.getApplicationLabel(pm.getApplicationInfo(packageName, 0)).toString() }
-                           catch (_: Exception) { packageName }
+                        ?: try {
+                            pm.getApplicationLabel(
+                                pm.getApplicationInfo(packageName, 0)
+                            ).toString()
+                        } catch (_: Exception) { packageName }
 
                     val app = AppInfo(
                         packageName = packageName,
@@ -174,7 +181,9 @@ object BackupManager {
                 val editor = context.getSharedPreferences(
                     "ItemStrictModePrefs", Context.MODE_PRIVATE
                 ).edit()
-                strictJson.keys().forEach { key ->
+                val keys = strictJson.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
                     when (val v = strictJson.get(key)) {
                         is Int     -> editor.putInt(key, v)
                         is Long    -> editor.putLong(key, v)
