@@ -48,17 +48,6 @@
             android:label="Advanced Blocker"
             android:exported="false" />
 
-        <!--
-            Bug fix: DegradedModeActivity was missing from the manifest.
-            WatchdogService starts this when the accessibility service is disabled.
-            Without this entry the app would crash with ActivityNotFoundException.
-        -->
-        <activity
-            android:name=".activities.DegradedModeActivity"
-            android:launchMode="singleTask"
-            android:excludeFromRecents="true"
-            android:exported="false" />
-
         <!-- ── Services ───────────────────────────────────────────────── -->
 
         <service
@@ -75,23 +64,8 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
-        <!--
-            Bug fix: DownloadBlockService needs foregroundServiceType on Android 14+.
-            dataSync covers a service that reads/writes files.
-        -->
         <service
             android:name=".services.DownloadBlockService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
-
-        <!--
-            Bug fix: WatchdogService was missing from the manifest entirely.
-            It monitors whether the accessibility service stays enabled and
-            shows DegradedModeActivity if the user tries to turn it off.
-            Uses dataSync type (already permitted) to satisfy Android 14+.
-        -->
-        <service
-            android:name=".services.WatchdogService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
