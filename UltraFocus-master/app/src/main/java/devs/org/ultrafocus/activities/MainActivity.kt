@@ -31,7 +31,6 @@ import devs.org.ultrafocus.repository.AppRepository
 import devs.org.ultrafocus.services.BlockerAccessibilityService
 import devs.org.ultrafocus.services.DeviceAdmin
 import devs.org.ultrafocus.services.DownloadBlockService
-import devs.org.ultrafocus.services.WatchdogService
 import devs.org.ultrafocus.utils.DownloadBlockPrefs
 import devs.org.ultrafocus.viewModel.MainViewModel
 import devs.org.ultrafocus.viewModel.factory.MainModelFactory
@@ -45,8 +44,7 @@ class MainActivity : AppCompatActivity() {
     private var list = mutableListOf<AppInfo>()
     private lateinit var options: ActivityOptionsCompat
 
-    // Guards against the downloadBlockSwitch listener firing when we
-    // programmatically toggle the switch during state sync.
+    // Prevents the downloadBlockSwitch listener firing when we sync state programmatically
     private var ignoreDownloadToggleCallback = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -70,10 +68,6 @@ class MainActivity : AppCompatActivity() {
         val factory = MainModelFactory(repository)
         viewModel = factory.create(MainViewModel::class.java)
 
-        // Bug fix: WatchdogService was never started anywhere in the codebase.
-        // Start it here so breach detection and DegradedModeActivity work.
-        startWatchdogService()
-
         clickListeners()
         loadSelectedApps()
         updateFocusSwitchState()
@@ -89,21 +83,6 @@ class MainActivity : AppCompatActivity() {
         updateDownloadStrictStateText()
     }
 
-    // ── WatchdogService ───────────────────────────────────────────────────────
-
-    private fun startWatchdogService() {
-        try {
-            val intent = Intent(this, WatchdogService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
-            }
-        } catch (_: Exception) {
-            // WatchdogService handles its own foreground-start failures gracefully
-        }
-    }
-
     // ── State sync ────────────────────────────────────────────────────────────
 
     private fun updateFocusSwitchState() {
@@ -116,8 +95,6 @@ class MainActivity : AppCompatActivity() {
         ignoreDownloadToggleCallback = false
     }
 
-    // Bug fix: was setting binding.downloadBlockSwitch.contentDescription (invisible
-    // screen-reader text) instead of the visible txtDownloadStrictStatus TextView.
     private fun updateDownloadStrictStateText() {
         binding.txtDownloadStrictStatus.text = DownloadBlockPrefs.getStatusText(this)
     }
@@ -126,7 +103,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun clickListeners() {
 
-        // Add apps (long-press → advanced blocker)
+        // Add apps — long-press opens the full advanced blocker (websites/keywords/screens)
         binding.btnAddApps.setOnClickListener {
             startActivity(Intent(this, SelectAppActivity::class.java))
         }
@@ -159,19 +136,12 @@ class MainActivity : AppCompatActivity() {
             handleDownloadBlockToggle(isChecked)
         }
 
-        // Bug fix: btnDownloadStrict had no click listener — dead button.
-        // Wire it to the strict mode dialog (same as long-pressing the switch).
+        // Set strict mode for download blocking
         binding.btnDownloadStrict.setOnClickListener {
             showDownloadStrictModeDialog()
         }
 
-        // Bug fix: btnOpenStrictMode had no click listener — dead button.
-        // Wire it to SpecificBlockerActivity where per-item strict mode is managed.
-        binding.btnOpenStrictMode.setOnClickListener {
-            startActivity(Intent(this, SpecificBlockerActivity::class.java))
-        }
-
-        // Time period (global schedule)
+        // Global time schedule
         binding.btnAddTimePeriod.setOnClickListener {
             showGlobalTimeDialog()
         }
