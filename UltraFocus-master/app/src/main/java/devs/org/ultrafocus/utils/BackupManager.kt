@@ -24,6 +24,14 @@ import org.json.JSONObject
  * Bug fixed: previously blocked apps were NOT included in the backup,
  * so importing a backup restored websites/keywords/screens but left the
  * app block list empty.
+ *
+ * Bug fixed: org.json has no Long type — all numbers parsed from a JSONObject
+ * come back as Int at runtime regardless of their actual value. The itemStrictMode
+ * import block must NOT use runtime type inference (is Int / is Long) to decide
+ * putInt vs putLong. It instead checks the key prefix so strict_req_* keys are
+ * always written with putLong and strict_hours_* keys with putInt. Using the wrong
+ * type causes a ClassCastException in SharedPreferencesImpl.getLong() the moment
+ * the adapter tries to read the value, crashing the app on the main screen after import.
  */
 object BackupManager {
 
@@ -69,7 +77,6 @@ object BackupManager {
             json.put("screens", screenArray)
 
             // ── Download block state ──────────────────────────────────────────
-            // getRequestTimestamp() is the real method name in DownloadBlockPrefs
             json.put("downloadBlock", JSONObject().apply {
                 put("enabled",     DownloadBlockPrefs.isEnabled(context))
                 put("strictHours", DownloadBlockPrefs.getStrictHours(context))
@@ -177,6 +184,12 @@ object BackupManager {
             }
 
             // ── Per-item strict mode ──────────────────────────────────────────
+            // IMPORTANT: org.json has no Long type. Every number in a parsed JSONObject
+            // comes back as Int at runtime, even values that were originally stored as Long.
+            // We must NOT use runtime type inference (is Int / is Long) here — it will
+            // always match Int and call putInt(), causing getLong() to ClassCastException
+            // at read time and crash the app. Instead we use the key prefix to decide
+            // the correct SharedPreferences type explicitly.
             json.optJSONObject("itemStrictMode")?.let { strictJson ->
                 val editor = context.getSharedPreferences(
                     "ItemStrictModePrefs", Context.MODE_PRIVATE
@@ -184,12 +197,10 @@ object BackupManager {
                 val keys = strictJson.keys()
                 while (keys.hasNext()) {
                     val key = keys.next()
-                    when (val v = strictJson.get(key)) {
-                        is Int     -> editor.putInt(key, v)
-                        is Long    -> editor.putLong(key, v)
-                        is Boolean -> editor.putBoolean(key, v)
-                        is String  -> editor.putString(key, v)
-                        else       -> {}
+                    when {
+                        key.startsWith("strict_req_")   -> editor.putLong(key, strictJson.getLong(key))
+                        key.startsWith("strict_hours_") -> editor.putInt(key, strictJson.getInt(key))
+                        // ignore any unrecognised keys
                     }
                 }
                 editor.apply()
