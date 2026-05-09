@@ -216,6 +216,38 @@ class SpecificBlockerActivity : AppCompatActivity() {
         })
         layout.addView(strictInput)
 
+        // RESTORED: Specific-page toggle — only shown on the Web tab.
+        // GENERAL blocks the entire domain. SPECIFIC blocks everything on the
+        // domain EXCEPT the exact path entered, letting you allow e.g. reddit.com/r/fitness
+        // while blocking the rest of reddit.com.
+        var selectedMode = WebBlockMode.GENERAL
+        if (currentTab == 2) {
+            val modeRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(0, 16, 0, 0)
+            }
+            val modeLabel = TextView(this).apply {
+                text = "Specific page only (allow this path, block rest)"
+                layoutParams = LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+                )
+            }
+            val modeToggle = Switch(this).apply {
+                isChecked = false
+                setOnCheckedChangeListener { _, isChecked ->
+                    selectedMode = if (isChecked) WebBlockMode.SPECIFIC else WebBlockMode.GENERAL
+                    input.hint = if (isChecked)
+                        "Full URL with path (e.g. reddit.com/r/gaming)"
+                    else
+                        "Website URL (e.g. reddit.com)"
+                }
+            }
+            modeRow.addView(modeLabel)
+            modeRow.addView(modeToggle)
+            layout.addView(modeRow)
+        }
+
         AlertDialog.Builder(this)
             .setTitle("Add Block")
             .setView(layout)
@@ -235,11 +267,7 @@ class SpecificBlockerActivity : AppCompatActivity() {
                         if (strictHours > 0) ItemStrictModeManager.setStrictMode(this, text, strictHours)
                     }
                     2 -> {
-                        WebsiteBlockManager.addSite(this, text, schedule)
-                        // Bug fix: WebsiteBlockManager normalizes the URL to a host key
-                        // (strips www., lowercases, etc.). We must use that same normalized
-                        // host as the ItemStrictModeManager key, otherwise the lock icon
-                        // in refreshList() will never appear because the keys won't match.
+                        WebsiteBlockManager.addSite(this, text, schedule, selectedMode)
                         if (strictHours > 0) {
                             val normalizedKey = WebsiteBlockManager.normalizeHost(text)
                             ItemStrictModeManager.setStrictMode(this, normalizedKey, strictHours)
@@ -284,6 +312,7 @@ class SpecificBlockerActivity : AppCompatActivity() {
         btnTabScreens.alpha  = if (index == 0) 1f else 0.5f
         btnTabKeywords.alpha = if (index == 1) 1f else 0.5f
         btnTabWeb.alpha      = if (index == 2) 1f else 0.5f
+        chkDebug.visibility = if (index == 0) android.view.View.VISIBLE else android.view.View.GONE
         fabAdd.text = when (index) {
             0 -> "Add Screen"
             1 -> "Add Keyword"
