@@ -1,9 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-    Root is a NestedScrollView so the entire page scrolls as one unit.
-    The RecyclerView inside uses wrap_content + nestedScrollingEnabled="false"
-    so it lays out all its items at once instead of scroll-within-scroll.
--->
 <androidx.core.widget.NestedScrollView
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -108,12 +103,6 @@
                     android:layout_marginTop="10dp"
                     android:text="Set Download Strict Mode" />
 
-                <!--
-                    Bug fix: this TextView was never updated by MainActivity because
-                    updateDownloadStrictStateText() was mistakenly setting
-                    downloadBlockSwitch.contentDescription instead of this view's text.
-                    Now properly wired in MainActivity.
-                -->
                 <TextView
                     android:id="@+id/txtDownloadStrictStatus"
                     android:layout_width="match_parent"
@@ -121,50 +110,6 @@
                     android:layout_marginTop="6dp"
                     android:text="Download strict mode status"
                     android:textSize="14sp" />
-
-            </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
-
-        <!-- ── Strict Mode card ──────────────────────────────────────── -->
-        <com.google.android.material.card.MaterialCardView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginHorizontal="18dp"
-            android:layout_marginVertical="8dp"
-            app:cardCornerRadius="10dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="15dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:padding="4dp"
-                    android:text="Strict Mode"
-                    android:textSize="20sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:padding="4dp"
-                    android:text="Manage per-item strict mode for blocked apps, websites, keywords, and screens."
-                    android:textSize="14sp" />
-
-                <!--
-                    Bug fix: this button had no click listener in MainActivity.
-                    Now wired to open SpecificBlockerActivity.
-                -->
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnOpenStrictMode"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:text="Open Strict Mode" />
 
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
@@ -235,12 +180,6 @@
             android:textSize="16sp"
             android:textStyle="bold" />
 
-        <!--
-            nestedScrollingEnabled="false" tells the RecyclerView to lay out ALL
-            items at once and let the outer NestedScrollView handle scrolling.
-            Without this the RecyclerView would only show a few rows and scroll
-            independently, fighting with the outer scroll view.
-        -->
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/recyclerView"
             android:layout_width="match_parent"
