@@ -1,39 +1,56 @@
-// main/java/devs/org/ultrafocus/utils/ItemStrictModeManager.kt
 package devs.org.ultrafocus.utils
 
 import android.content.Context
 import android.content.SharedPreferences
-import java.util.concurrent.TimeUnit
 
 /**
- * Per-item strict mode.
- * Each blocked item (package name, keyword, website host/path, screen class)
- * can have its own unlock delay independent of the global StrictModeManager.
+ * Manages per-item strict mode for the SpecificBlockerActivity list.
  *
- * Storage keys per item (itemKey = packageName / keyword / host+path / className):
- *   strict_hours_{itemKey}    → Int   (0 = no strict mode)
- *   strict_req_{itemKey}      → Long  (timestamp of unlock request, 0 = no request)
+ * How it works:
+ * - setStrictMode(key, hours): arms the lock. Until requestUnlock() is called
+ *   and the cooldown expires, the item cannot be deleted.
+ * - requestUnlock(key): records the current timestamp. The item unlocks only
+ *   after [strictHours] hours have elapsed since this timestamp.
+ * - isLocked(key): returns true if the item is armed AND the cooldown has not yet passed.
+ *
+ * Bug fixed: previously setStrictMode() could be called again on an already-locked
+ * item with a smaller hours value (e.g. 1 instead of 24), effectively bypassing the
+ * lock by resetting the cooldown to a much shorter period. Now setStrictMode() silently
+ * ignores any call that would weaken an active lock.
  */
 object ItemStrictModeManager {
 
-    private const val PREF_NAME = "ItemStrictModePrefs"
+    private const val PREFS_NAME   = "ItemStrictModePrefs"
     private const val PREFIX_HOURS = "strict_hours_"
-    private const val PREFIX_REQ = "strict_req_"
+    private const val PREFIX_REQ   = "strict_req_"
 
     private fun getPrefs(context: Context): SharedPreferences =
-        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    // ── Setup ────────────────────────────────────────────────────────────────
+    // ── Public API ────────────────────────────────────────────────────────────
 
-    /** Set or update strict mode hours for a specific item. 0 = disabled. */
+    /**
+     * Arms strict mode for [itemKey] with a [hours]-hour unlock delay.
+     *
+     * If the item is already locked, this call is ignored unless the new
+     * [hours] value is strictly greater than the current one — you can only
+     * make a lock stronger, never weaker.
+     */
     fun setStrictMode(context: Context, itemKey: String, hours: Int) {
+        if (hours <= 0) return
+
+        // Bug fix: if already locked, only allow increasing the delay.
+        // Without this check a user could re-add an item with hours=1 to bypass
+        // a 24-hour lock by resetting the cooldown to a trivially short period.
+        if (isLocked(context, itemKey)) {
+            val currentHours = getHours(context, itemKey)
+            if (hours <= currentHours) return
+        }
+
         restoreStrictMode(context, itemKey, hours, 0L)
     }
 
-    /**
-     * Restore strict mode hours and request timestamp exactly as saved.
-     * Use this for backup/import restore.
-     */
+    /** Used by BackupManager to restore a lock including its original timestamp. */
     fun restoreStrictMode(
         context: Context,
         itemKey: String,
@@ -41,119 +58,87 @@ object ItemStrictModeManager {
         requestTimestamp: Long
     ) {
         if (hours < 0) return
-
         val editor = getPrefs(context).edit()
-
-        if (hours <= 0) {
+        if (hours == 0) {
             editor.remove(PREFIX_HOURS + itemKey)
-                .remove(PREFIX_REQ + itemKey)
-                .apply()
+                  .remove(PREFIX_REQ   + itemKey)
+                  .apply()
             return
         }
-
-        editor.putInt(PREFIX_HOURS + itemKey, hours)
-            .putLong(PREFIX_REQ + itemKey, requestTimestamp.coerceAtLeast(0L))
-            .apply()
+        editor.putInt (PREFIX_HOURS + itemKey, hours)
+              .putLong(PREFIX_REQ   + itemKey, requestTimestamp.coerceAtLeast(0L))
+              .apply()
     }
 
-    /** Remove all strict mode data for a specific item. */
-    fun clearItem(context: Context, itemKey: String) {
-        getPrefs(context).edit()
-            .remove(PREFIX_HOURS + itemKey)
-            .remove(PREFIX_REQ + itemKey)
-            .apply()
-    }
-
-    /** Remove all per-item strict mode data. */
-    fun clearAll(context: Context) {
-        getPrefs(context).edit().clear().apply()
-    }
-
-    // ── State queries ────────────────────────────────────────────────────────
-
-    fun getHours(context: Context, itemKey: String): Int =
-        getPrefs(context).getInt(PREFIX_HOURS + itemKey, 0)
-
-    fun getRequestTimestamp(context: Context, itemKey: String): Long =
-        getPrefs(context).getLong(PREFIX_REQ + itemKey, 0L)
-
-    fun isEnabled(context: Context, itemKey: String): Boolean =
-        getHours(context, itemKey) > 0
-
-    /**
-     * Returns true if this item is strictly locked
-     * (enabled AND the unlock countdown has not completed yet).
-     */
-    fun isLocked(context: Context, itemKey: String): Boolean {
-        val hours = getHours(context, itemKey)
-        if (hours <= 0) return false
-
-        val reqTime = getRequestTimestamp(context, itemKey)
-        if (reqTime == 0L) return true
-
-        val delayMs = hours.toLong() * 3_600_000L
-        return (System.currentTimeMillis() - reqTime) < delayMs
-    }
-
-    fun hasAnyEnabledStrictMode(context: Context): Boolean {
-        return getAllKeys(context).isNotEmpty()
-    }
-
-    // ── Unlock flow ──────────────────────────────────────────────────────────
-
-    /** Start the countdown clock for this item's unlock. */
+    /** Starts the unlock countdown for [itemKey]. */
     fun requestUnlock(context: Context, itemKey: String) {
-        if (getHours(context, itemKey) <= 0) return
         getPrefs(context).edit()
             .putLong(PREFIX_REQ + itemKey, System.currentTimeMillis())
             .apply()
     }
 
-    /** Cancel a pending unlock request, re-locking the item immediately. */
+    /** Cancels a pending unlock request without disabling strict mode. */
     fun cancelRequest(context: Context, itemKey: String) {
         getPrefs(context).edit()
             .putLong(PREFIX_REQ + itemKey, 0L)
             .apply()
     }
 
-    /** Milliseconds remaining until unlock completes. 0 if already unlocked. */
-    fun getTimeRemaining(context: Context, itemKey: String): Long {
-        val hours = getHours(context, itemKey)
-        if (hours <= 0) return 0L
-
-        val reqTime = getRequestTimestamp(context, itemKey)
-        if (reqTime == 0L) return hours.toLong() * 3_600_000L
-
-        val diff = (hours.toLong() * 3_600_000L) - (System.currentTimeMillis() - reqTime)
-        return if (diff < 0) 0L else diff
+    /** Fully removes strict mode for [itemKey] (call after the item is deleted). */
+    fun clearItem(context: Context, itemKey: String) {
+        getPrefs(context).edit()
+            .remove(PREFIX_HOURS + itemKey)
+            .remove(PREFIX_REQ   + itemKey)
+            .apply()
     }
 
-    /** Human-readable status string for UI display. */
+    /** True if strict mode is armed for [itemKey] (regardless of lock state). */
+    fun isEnabled(context: Context, itemKey: String): Boolean =
+        getHours(context, itemKey) > 0
+
+    /**
+     * True if the item is currently locked and cannot be deleted.
+     *
+     * Locked means:
+     * - strict mode is armed (hours > 0), AND
+     * - either no unlock has been requested (req == 0), OR
+     *   the cooldown period has not yet elapsed.
+     */
+    fun isLocked(context: Context, itemKey: String): Boolean {
+        val hours = getHours(context, itemKey)
+        if (hours <= 0) return false
+
+        val req = getPrefs(context).getLong(PREFIX_REQ + itemKey, 0L)
+        if (req == 0L) return true // armed, unlock not yet requested
+
+        val elapsedMs    = System.currentTimeMillis() - req
+        val cooldownMs   = hours * 60L * 60L * 1000L
+        return elapsedMs < cooldownMs
+    }
+
+    /** Human-readable status string shown in the lock dialog. */
     fun getStatusText(context: Context, itemKey: String): String {
         val hours = getHours(context, itemKey)
-        if (hours <= 0) return "No strict mode"
+        if (hours <= 0) return "No strict mode set."
 
-        val reqTime = getRequestTimestamp(context, itemKey)
-        if (reqTime == 0L) return "🔒 Locked ($hours h delay)"
+        val req = getPrefs(context).getLong(PREFIX_REQ + itemKey, 0L)
+        if (req == 0L) return "🔒 Locked for $hours hour(s). No unlock requested yet."
 
-        val remaining = getTimeRemaining(context, itemKey)
-        if (remaining <= 0L) return "🔓 Unlocked — you can now delete this"
+        val elapsedMs  = System.currentTimeMillis() - req
+        val cooldownMs = hours * 60L * 60L * 1000L
+        val remaining  = cooldownMs - elapsedMs
 
-        val h = TimeUnit.MILLISECONDS.toHours(remaining)
-        val m = TimeUnit.MILLISECONDS.toMinutes(remaining) % 60
-        val s = TimeUnit.MILLISECONDS.toSeconds(remaining) % 60
-        return "⏳ Unlocking in %02d:%02d:%02d".format(h, m, s)
+        return if (remaining > 0) {
+            val h = remaining / 3_600_000
+            val m = (remaining % 3_600_000) / 60_000
+            "🔒 Unlock in ${h}h ${m}m"
+        } else {
+            "🔓 Unlock cooldown elapsed. You may delete now."
+        }
     }
 
-    // ── Backup helpers ───────────────────────────────────────────────────────
+    // ── Internal helpers ──────────────────────────────────────────────────────
 
-    /** Returns all item keys that have strict mode set (hours > 0). */
-    fun getAllKeys(context: Context): Set<String> {
-        val prefs = getPrefs(context)
-        return prefs.all.keys
-            .filter { it.startsWith(PREFIX_HOURS) }
-            .map { it.removePrefix(PREFIX_HOURS) }
-            .filter { key -> prefs.getInt(PREFIX_HOURS + key, 0) > 0 }
-            .toSet()
-    }
+    private fun getHours(context: Context, itemKey: String): Int =
+        getPrefs(context).getInt(PREFIX_HOURS + itemKey, 0)
 }
