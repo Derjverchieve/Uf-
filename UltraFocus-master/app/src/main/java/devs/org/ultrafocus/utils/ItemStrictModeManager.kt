@@ -109,10 +109,10 @@ object ItemStrictModeManager {
         if (hours <= 0) return false
 
         val req = getPrefs(context).getLong(PREFIX_REQ + itemKey, 0L)
-        if (req == 0L) return true // armed, unlock not yet requested
+        if (req == 0L) return true
 
-        val elapsedMs    = System.currentTimeMillis() - req
-        val cooldownMs   = hours * 60L * 60L * 1000L
+        val elapsedMs  = System.currentTimeMillis() - req
+        val cooldownMs = hours * 60L * 60L * 1000L
         return elapsedMs < cooldownMs
     }
 
@@ -137,8 +137,7 @@ object ItemStrictModeManager {
         }
     }
 
-    // ── Internal helpers ──────────────────────────────────────────────────────
-
-    private fun getHours(context: Context, itemKey: String): Int =
+    // Public so SelectedAppsAdapter can read the configured delay for display purposes
+    fun getHours(context: Context, itemKey: String): Int =
         getPrefs(context).getInt(PREFIX_HOURS + itemKey, 0)
 }
