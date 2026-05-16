@@ -1,26 +1,45 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+
+    <!-- ── Base ──────────────────────────────────────────────────────────── -->
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
 
-    <!-- FIXED: Added the missing colors causing your error -->
-    <color name="gray">#808080</color>
-    <color name="orange">#FF9800</color>
+    <!-- ── Background surfaces ───────────────────────────────────────────── -->
+    <!-- Deep navy — warmer than pure #121212, easier on the eyes -->
+    <color name="background">#0D1117</color>
+    <!-- Cards sit one step above background -->
+    <color name="surface">#161B22</color>
+    <!-- Slightly lighter for nested/variant cards -->
+    <color name="surface_variant">#1C2128</color>
+    <!-- Subtle 1dp card border so cards have definition without elevation shadow -->
+    <color name="card_stroke">#30363D</color>
 
-    <!-- New UI Colors -->
-    <color name="primary">#2196F3</color>       <!-- Tech Blue -->
-    <color name="accent">#00E5FF</color>        <!-- Cyan Accent -->
-    <color name="background">#121212</color>    <!-- Deep Dark Background -->
-    <color name="surface">#1E1E1E</color>       <!-- Card Background -->
-
-    <color name="text_primary">#FFFFFF</color>  <!-- White Text -->
-    <color name="text_secondary">#B3B3B3</color><!-- Light Grey Text -->
-    <color name="text_hint">#808080</color>     <!-- Dark Grey Hint -->
-
-    <!-- Standard System Colors -->
-    <color name="colorPrimary">#2196F3</color>
-    <color name="colorPrimaryVariant">#0069C0</color>
+    <!-- ── Brand ──────────────────────────────────────────────────────────── -->
+    <color name="primary">#2F81F7</color>          <!-- GitHub-style blue -->
+    <color name="primary_dark">#1A6DD4</color>
+    <color name="colorPrimary">#2F81F7</color>
+    <color name="colorPrimaryVariant">#1A6DD4</color>
     <color name="colorOnPrimary">#FFFFFF</color>
-    <color name="colorSecondary">#00E5FF</color>
+    <color name="colorSecondary">#58A6FF</color>
     <color name="colorOnSecondary">#000000</color>
+
+    <!-- ── Typography ────────────────────────────────────────────────────── -->
+    <color name="text_primary">#E6EDF3</color>     <!-- Off-white — less harsh than pure white -->
+    <color name="text_secondary">#8B949E</color>   <!-- Muted grey for subtitles -->
+    <color name="text_hint">#484F58</color>        <!-- Placeholder / disabled text -->
+
+    <!-- ── Semantic ──────────────────────────────────────────────────────── -->
+    <color name="orange">#F0883E</color>            <!-- Blocked screen title -->
+    <color name="gray">#8B949E</color>
+
+    <!-- Soft block amber — shield icon tint when soft block is active -->
+    <color name="soft_block_amber">#E3B341</color>
+
+    <!-- Strict mode lock red -->
+    <color name="locked_red">#F85149</color>
+
+    <!-- Success / unlocked green -->
+    <color name="unlocked_green">#3FB950</color>
+
 </resources>
