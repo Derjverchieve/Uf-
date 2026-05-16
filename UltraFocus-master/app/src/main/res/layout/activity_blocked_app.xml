@@ -1,21 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/main"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:gravity="center"
-    android:padding="24dp"
+    android:background="@color/background"
+    android:padding="32dp"
     tools:context=".activities.BlockedAppActivity">
 
     <ImageView
-        android:layout_width="220dp"
-        android:layout_height="220dp"
+        android:layout_width="160dp"
+        android:layout_height="160dp"
         android:src="@drawable/ic_phone_addiction"
         android:contentDescription="@string/addiction_image"
-        android:layout_marginBottom="24dp"/>
+        android:layout_marginBottom="28dp"
+        android:alpha="0.85"/>
+
+    <!-- Red accent line -->
+    <View
+        android:layout_width="40dp"
+        android:layout_height="3dp"
+        android:background="@color/locked_red"
+        android:layout_marginBottom="16dp"/>
 
     <TextView
         android:id="@+id/titleTextView"
@@ -23,26 +33,36 @@
         android:layout_height="wrap_content"
         android:text="@string/hold_on"
         android:textStyle="bold"
-        android:textSize="28sp"
-        android:textColor="@color/orange"
-        android:layout_marginBottom="12dp"/>
+        android:textSize="30sp"
+        android:textColor="@color/text_primary"
+        android:layout_marginBottom="10dp"/>
 
     <TextView
         android:id="@+id/messageTextView"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Take a short break.\nLet your mind rest and do something offline.\nYou’ve got this!"
-        android:textSize="16sp"
+        android:text="Take a short break.\nLet your mind rest and do something offline.\nYou've got this!"
+        android:textSize="15sp"
+        android:textColor="@color/text_secondary"
         android:gravity="center"
-        android:padding="16dp"
-        android:layout_marginBottom="24dp" />
+        android:lineSpacingMultiplier="1.4"
+        android:layout_marginBottom="40dp"/>
 
     <com.google.android.material.button.MaterialButton
         android:id="@+id/btnBackToFocus"
-        android:layout_width="wrap_content"
-        android:layout_height="55dp"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
         android:text="@string/back_to_focus_mode"
-        style="@style/Widget.Material3.Button.OutlinedButton"
-        android:layout_marginTop="12dp"/>
+        android:textSize="15sp"
+        style="@style/Widget.Material3.Button.OutlinedButton"/>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="Long press the button above for emergency override"
+        android:textSize="11sp"
+        android:textColor="@color/text_hint"
+        android:gravity="center"/>
 
 </LinearLayout>
