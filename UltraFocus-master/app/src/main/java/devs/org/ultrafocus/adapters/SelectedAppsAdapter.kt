@@ -11,11 +11,14 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
+import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
+import devs.org.ultrafocus.R
 import devs.org.ultrafocus.databinding.SelectedAppItemBinding
 import devs.org.ultrafocus.model.AppInfo
 import devs.org.ultrafocus.utils.ItemStrictModeManager
+import devs.org.ultrafocus.utils.SoftBlockManager
 import devs.org.ultrafocus.utils.TypeToAccessDialog
 
 class SelectedAppsAdapter(
@@ -45,20 +48,65 @@ class SelectedAppsAdapter(
                 Glide.with(context).load(appInfo.icon).into(binding.icon)
             } catch (_: Exception) {}
 
-            val isStrictLocked = ItemStrictModeManager.isLocked(context, appInfo.packageName)
+            val isStrictLocked  = ItemStrictModeManager.isLocked(context, appInfo.packageName)
             val isStrictEnabled = ItemStrictModeManager.isEnabled(context, appInfo.packageName)
+            val isSoft          = SoftBlockManager.isSoftBlocked(context, appInfo.packageName)
+
+            // ── App name label ───────────────────────────────────────────────
             binding.label.text = when {
                 isStrictLocked  -> "${appInfo.appName} 🔒"
                 isStrictEnabled -> "${appInfo.appName} 🔓"
                 else            -> appInfo.appName
             }
 
+            // ── Sub-label (schedule / soft block indicator) ───────────────────
             val schedule = appInfo.fromTime ?: ""
-            if (schedule.isNotEmpty()) {
-                binding.timePeriodInfo.text = "Schedule: $schedule"
-                binding.timePeriodInfo.visibility = ViewGroup.VISIBLE
-            } else {
-                binding.timePeriodInfo.visibility = ViewGroup.GONE
+            when {
+                isSoft && schedule.isNotEmpty() -> {
+                    binding.timePeriodInfo.text = "Soft block  •  Schedule: $schedule"
+                    binding.timePeriodInfo.visibility = ViewGroup.VISIBLE
+                    binding.timePeriodInfo.setTextColor(
+                        ContextCompat.getColor(context, R.color.soft_block_amber)
+                    )
+                }
+                isSoft -> {
+                    binding.timePeriodInfo.text = "Soft block (UUID challenge)"
+                    binding.timePeriodInfo.visibility = ViewGroup.VISIBLE
+                    binding.timePeriodInfo.setTextColor(
+                        ContextCompat.getColor(context, R.color.soft_block_amber)
+                    )
+                }
+                schedule.isNotEmpty() -> {
+                    binding.timePeriodInfo.text = "Schedule: $schedule"
+                    binding.timePeriodInfo.visibility = ViewGroup.VISIBLE
+                    binding.timePeriodInfo.setTextColor(
+                        ContextCompat.getColor(context, R.color.text_secondary)
+                    )
+                }
+                else -> {
+                    binding.timePeriodInfo.visibility = ViewGroup.GONE
+                }
+            }
+
+            // ── Soft block button ────────────────────────────────────────────
+            val shieldTint = if (isSoft)
+                ContextCompat.getColor(context, R.color.soft_block_amber)
+            else
+                ContextCompat.getColor(context, R.color.text_secondary)
+            binding.btnSoftBlock.setColorFilter(shieldTint)
+
+            binding.btnSoftBlock.setOnClickListener {
+                val pos = adapterPosition
+                if (pos == RecyclerView.NO_POSITION) return@setOnClickListener
+                val app = list[pos]
+                val currentlySoft = SoftBlockManager.isSoftBlocked(context, app.packageName)
+                SoftBlockManager.setSoftBlock(context, app.packageName, !currentlySoft)
+                val msg = if (!currentlySoft)
+                    "${app.appName} set to soft block — UUID challenge required to open"
+                else
+                    "${app.appName} switched back to hard block"
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                notifyItemChanged(pos)
             }
 
             // ── Delete button ────────────────────────────────────────────────
@@ -67,14 +115,13 @@ class SelectedAppsAdapter(
                 if (pos == RecyclerView.NO_POSITION || pos >= list.size) return@setOnClickListener
 
                 val app = list[pos]
-
                 if (ItemStrictModeManager.isLocked(context, app.packageName)) {
                     showItemStrictModeDialog(app)
                     return@setOnClickListener
                 }
-
                 list.removeAt(pos)
                 notifyItemRemoved(pos)
+                SoftBlockManager.setSoftBlock(context, app.packageName, false)
                 onItemRemovedCallback?.invoke(app)
             }
 
@@ -83,7 +130,7 @@ class SelectedAppsAdapter(
                 true
             }
 
-            // ── Timer button — set schedule ──────────────────────────────────
+            // ── Timer button — schedule ──────────────────────────────────────
             binding.btnSetTimePeriod.setOnClickListener {
                 onSetTimePeriodCallback?.invoke(appInfo)
             }
@@ -139,6 +186,7 @@ class SelectedAppsAdapter(
                         list.removeAt(pos)
                         notifyItemRemoved(pos)
                         ItemStrictModeManager.clearItem(context, key)
+                        SoftBlockManager.setSoftBlock(context, key, false)
                         onItemRemovedCallback?.invoke(app)
                     }
                 }
@@ -153,9 +201,8 @@ class SelectedAppsAdapter(
         private fun showStrictModeSetupDialog(appInfo: AppInfo) {
             val key = appInfo.packageName
 
-            // BUG FIX: If strict mode is currently active and locked, the user must go
-            // through the proper unlock flow — they cannot edit the delay value directly.
-            // Previously, entering 0 here called clearItem() and bypassed the lock entirely.
+            // BUG FIX: redirect to lock dialog if already locked — prevents editing
+            // the delay value to 0 as a bypass while strict mode is active.
             if (ItemStrictModeManager.isLocked(context, key)) {
                 showItemStrictModeDialog(appInfo)
                 return
@@ -191,9 +238,6 @@ class SelectedAppsAdapter(
                 .setPositiveButton("Save") { _, _ ->
                     val hours = hoursInput.text.toString().toIntOrNull() ?: 0
                     if (hours <= 0) {
-                        // Only reachable when NOT locked (guard is at the top of this function),
-                        // so clearing is safe here — the user is just disabling strict mode
-                        // before it was ever activated.
                         ItemStrictModeManager.clearItem(context, key)
                         Toast.makeText(context, "Strict mode removed for ${appInfo.appName}", Toast.LENGTH_SHORT).show()
                     } else {
@@ -215,3 +259,4 @@ class SelectedAppsAdapter(
         this.onSetTimePeriodCallback = callback
     }
 }
+
