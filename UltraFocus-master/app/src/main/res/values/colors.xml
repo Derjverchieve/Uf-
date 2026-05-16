@@ -17,6 +17,8 @@
 
     <!-- ── Brand ──────────────────────────────────────────────────────────── -->
     <color name="primary">#2F81F7</color>          <!-- GitHub-style blue -->
+    <!-- Alias kept for legacy drawables (e.g. selected_indicator.xml) -->
+    <color name="accent">#2F81F7</color>
     <color name="primary_dark">#1A6DD4</color>
     <color name="colorPrimary">#2F81F7</color>
     <color name="colorPrimaryVariant">#1A6DD4</color>
