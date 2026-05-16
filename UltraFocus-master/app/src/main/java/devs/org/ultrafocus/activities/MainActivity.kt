@@ -21,6 +21,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.appcompat.app.AlertDialog
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import devs.org.ultrafocus.R
 import devs.org.ultrafocus.adapters.SelectedAppsAdapter
@@ -225,9 +226,8 @@ class MainActivity : AppCompatActivity() {
             "Disable strict mode"
         )
 
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Download Blocking Strict Mode")
-            .setMessage(DownloadBlockPrefs.getStatusText(this))
+        AlertDialog.Builder(this)
+            .setTitle("Download Strict Mode\n${DownloadBlockPrefs.getStatusText(this)}")
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> DownloadBlockPrefs.setStrictMode(this, 1)
