@@ -8,9 +8,11 @@ import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import devs.org.ultrafocus.activities.BlockedAppActivity
+import devs.org.ultrafocus.activities.SoftBlockActivity
 import devs.org.ultrafocus.database.AppDatabase
 import devs.org.ultrafocus.repository.AppRepository
 import devs.org.ultrafocus.utils.ContentBlockManager
+import devs.org.ultrafocus.utils.SoftBlockManager
 import devs.org.ultrafocus.utils.SpecificScreenManager
 import devs.org.ultrafocus.utils.TemporaryAccessManager
 import devs.org.ultrafocus.utils.WebsiteBlockManager
@@ -183,15 +185,6 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     // ── URL scanning ─────────────────────────────────────────────────────────
-    /**
-     * When a blocked URL is detected:
-     * 1. Try to overwrite the URL bar text with Google via ACTION_SET_TEXT.
-     *    This clears the blocked URL from the tab so the user won't see it
-     *    if they return to the browser (the tab now shows Google).
-     * 2. Go HOME immediately.
-     * 3. Open Google via intent — works regardless of whether step 1 succeeded,
-     *    and ensures the user always lands on a safe page.
-     */
     private fun scanForBlockedUrls(
         rootNode: AccessibilityNodeInfo,
         packageName: String
@@ -207,23 +200,13 @@ class BlockerAccessibilityService : AccessibilityService() {
         lastBlockedWebsiteKey = blockKey
         lastWebsiteBlockTime = now
 
-        // Step 1: rewrite the URL bar so the blocked page is replaced in-tab.
         tryRedirectBrowserTab(rootNode, packageName)
-
-        // Step 2: go HOME — removes browser from view immediately.
         performGlobalAction(GLOBAL_ACTION_HOME)
-
-        // Step 3: open Google via intent so the user lands on something safe.
         performRedirectToGoogle()
 
         return true
     }
 
-    /**
-     * Writes "https://www.google.com" into the browser's address bar using
-     * ACTION_SET_TEXT so the blocked URL is gone from the tab.
-     * Navigation itself is handled by the intent in step 3 of scanForBlockedUrls.
-     */
     private fun tryRedirectBrowserTab(
         rootNode: AccessibilityNodeInfo,
         packageName: String
@@ -253,9 +236,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    /**
-     * Read the address bar text using the browser's known view ID.
-     */
     private fun captureBrowserUrl(
         rootNode: AccessibilityNodeInfo,
         packageName: String
@@ -336,6 +316,106 @@ class BlockerAccessibilityService : AccessibilityService() {
         val split = t.trim().split(":")
         return split[0].toInt() * 60 + split[1].toInt()
     }
+
+    private fun performRedirectToGoogle() {
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com")).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addCategory(Intent.CATEGORY_BROWSABLE)
+            }
+            startActivity(intent)
+        } catch (_: Exception) {}
+    }
+
+    private fun scanForBlockedContent(node: AccessibilityNodeInfo): Boolean {
+        if (!node.isVisibleToUser) return false
+        val text = node.text?.toString()
+        if (!text.isNullOrEmpty() &&
+            ContentBlockManager.containsBlockedContent(this, text)) return true
+        val desc = node.contentDescription?.toString()
+        if (!desc.isNullOrEmpty() &&
+            ContentBlockManager.containsBlockedContent(this, desc)) return true
+        val childCount = node.childCount
+        for (i in 0 until childCount) {
+            val child = node.getChild(i)
+            if (child != null) {
+                if (scanForBlockedContent(child)) return true
+                child.recycle()
+            }
+        }
+        return false
+    }
+
+    /**
+     * Central block dispatcher.
+     *
+     * Soft-blocked apps → SoftBlockActivity (UUID challenge, then access granted).
+     * Hard-blocked apps → BlockedAppActivity (full block with emergency override).
+     *
+     * TemporaryAccessManager is checked first so that a successfully completed
+     * soft-block challenge (or emergency override) is always honoured.
+     */
+    private fun performBlock(packageName: String) {
+        if (packageName == this.packageName) return
+        if (TemporaryAccessManager.isAllowed(packageName)) return
+
+        try {
+            val currentTime = System.currentTimeMillis()
+            if (lastBlockedPackage == packageName &&
+                currentTime - lastBlockTime < blockCooldownMs) {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                return
+            }
+
+            currentlyBlockedApps.add(packageName)
+            lastBlockedPackage = packageName
+            lastBlockTime = currentTime
+
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            performGlobalAction(GLOBAL_ACTION_HOME)
+
+            val isSoft = SoftBlockManager.isSoftBlocked(this, packageName)
+
+            serviceScope.launch {
+                delay(50)
+                try {
+                    val intent = if (isSoft) {
+                        // Soft block: generate a fresh challenge and send it with the intent
+                        val challenge = SoftBlockManager.generateChallenge()
+                        Intent(this@BlockerAccessibilityService, SoftBlockActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                            putExtra("blocked_package", packageName)
+                            putExtra("challenge_code", challenge)
+                        }
+                    } else {
+                        // Hard block
+                        Intent(this@BlockerAccessibilityService, BlockedAppActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                            putExtra("blocked_package", packageName)
+                        }
+                    }
+                    startActivity(intent)
+                    delay(1000)
+                    currentlyBlockedApps.remove(packageName)
+                } catch (_: Exception) {
+                    currentlyBlockedApps.remove(packageName)
+                }
+            }
+        } catch (_: Exception) {
+            currentlyBlockedApps.remove(packageName)
+        }
+    }
+
+    override fun onInterrupt() {}
+
+    override fun onDestroy() {
+        super.onDestroy()
+        serviceScope.cancel()
+        isServiceReady = false
+        currentlyBlockedApps.clear()
+    }
+}
+
 
     private fun performRedirectToGoogle() {
         try {
