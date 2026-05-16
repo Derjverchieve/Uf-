@@ -44,7 +44,6 @@ class MainActivity : AppCompatActivity() {
     private var list = mutableListOf<AppInfo>()
     private lateinit var options: ActivityOptionsCompat
 
-    // Prevents the downloadBlockSwitch listener firing when we sync state programmatically
     private var ignoreDownloadToggleCallback = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -72,7 +71,7 @@ class MainActivity : AppCompatActivity() {
         loadSelectedApps()
         updateFocusSwitchState()
         updateDownloadBlockSwitchState()
-        updateDownloadStrictStateText()
+        updateDownloadStrictState()
     }
 
     override fun onResume() {
@@ -80,7 +79,7 @@ class MainActivity : AppCompatActivity() {
         loadSelectedApps()
         updateFocusSwitchState()
         updateDownloadBlockSwitchState()
-        updateDownloadStrictStateText()
+        updateDownloadStrictState()
     }
 
     // ── State sync ────────────────────────────────────────────────────────────
@@ -95,15 +94,17 @@ class MainActivity : AppCompatActivity() {
         ignoreDownloadToggleCallback = false
     }
 
-    private fun updateDownloadStrictStateText() {
+    private fun updateDownloadStrictState() {
+        // FIX: update both the status text AND the button label so users
+        // can see strict mode state without opening the dialog.
         binding.txtDownloadStrictStatus.text = DownloadBlockPrefs.getStatusText(this)
+        binding.btnDownloadStrict.text = DownloadBlockPrefs.getStrictButtonLabel(this)
     }
 
     // ── Click listeners ───────────────────────────────────────────────────────
 
     private fun clickListeners() {
 
-        // Add apps — long-press opens the full advanced blocker (websites/keywords/screens)
         binding.btnAddApps.setOnClickListener {
             startActivity(Intent(this, SelectAppActivity::class.java))
         }
@@ -112,7 +113,6 @@ class MainActivity : AppCompatActivity() {
             true
         }
 
-        // Focus mode switch
         binding.focusSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked) {
                 if (!isAccessibilityServiceEnabled()) showMaterialDialog()
@@ -130,23 +130,19 @@ class MainActivity : AppCompatActivity() {
             true
         }
 
-        // Download block switch
         binding.downloadBlockSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (ignoreDownloadToggleCallback) return@setOnCheckedChangeListener
             handleDownloadBlockToggle(isChecked)
         }
 
-        // Set strict mode for download blocking
         binding.btnDownloadStrict.setOnClickListener {
             showDownloadStrictModeDialog()
         }
 
-        // Global time schedule
         binding.btnAddTimePeriod.setOnClickListener {
             showGlobalTimeDialog()
         }
 
-        // Toolbar settings menu
         binding.toolbar.setOnMenuItemClickListener { menuItem ->
             if (menuItem.itemId == R.id.done) {
                 showSettingsDialog()
@@ -185,7 +181,7 @@ class MainActivity : AppCompatActivity() {
             stopDownloadBlockService()
         }
 
-        updateDownloadStrictStateText()
+        updateDownloadStrictState()
     }
 
     private fun startDownloadBlockService() {
@@ -250,7 +246,7 @@ class MainActivity : AppCompatActivity() {
                         DownloadBlockPrefs.clearStrictMode(this)
                     }
                 }
-                updateDownloadStrictStateText()
+                updateDownloadStrictState()
             }
             .setNegativeButton("Close", null)
             .show()
