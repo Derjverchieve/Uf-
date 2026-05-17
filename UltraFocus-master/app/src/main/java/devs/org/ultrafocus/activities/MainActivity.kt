@@ -2,6 +2,7 @@ package devs.org.ultrafocus.activities
 
 import android.annotation.SuppressLint
 import android.app.admin.DevicePolicyManager
+import android.content.Context
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
@@ -218,38 +219,83 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showDownloadStrictModeDialog() {
-        val items = arrayOf(
-            "1 hour",
-            "6 hours",
-            "12 hours",
-            "24 hours",
-            "Disable strict mode"
-        )
+        val key = "download_block"
+        val isLocked = DownloadBlockPrefs.isLocked(this)
+        val currentHours = DownloadBlockPrefs.getStrictHours(this)
+        val prefs = getSharedPreferences("download_block_prefs", Context.MODE_PRIVATE)
+        val reqTime = prefs.getLong("strict_req", 0L)
 
-        AlertDialog.Builder(this)
-            .setTitle("Download Strict Mode\n${DownloadBlockPrefs.getStatusText(this)}")
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> DownloadBlockPrefs.setStrictMode(this, 1)
-                    1 -> DownloadBlockPrefs.setStrictMode(this, 6)
-                    2 -> DownloadBlockPrefs.setStrictMode(this, 12)
-                    3 -> DownloadBlockPrefs.setStrictMode(this, 24)
-                    4 -> {
-                        if (DownloadBlockPrefs.isLocked(this)) {
-                            Toast.makeText(
-                                this,
-                                "Strict mode is active and cannot be disabled yet.",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                            return@setItems
-                        }
-                        DownloadBlockPrefs.clearStrictMode(this)
-                    }
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(60, 40, 60, 10)
+        }
+
+        val statusText = TextView(this).apply {
+            textAlignment = android.view.View.TEXT_ALIGNMENT_CENTER
+            textSize = 15f
+            setPadding(0, 0, 0, 20)
+            text = DownloadBlockPrefs.getStatusText(this@MainActivity)
+        }
+        layout.addView(statusText)
+
+        // Countdown ticker
+        val h = Handler(Looper.getMainLooper())
+        val r = object : Runnable {
+            override fun run() {
+                statusText.text = DownloadBlockPrefs.getStatusText(this@MainActivity)
+                if (DownloadBlockPrefs.isLocked(this@MainActivity)) h.postDelayed(this, 1000)
+            }
+        }
+        h.post(r)
+
+        val builder = AlertDialog.Builder(this).setTitle("Download Strict Mode")
+
+        if (isLocked) {
+            // Locked state — show unlock flow, no input field
+            builder.setView(layout)
+            when {
+                reqTime == 0L -> builder.setPositiveButton("Request Unlock") { _, _ ->
+                    DownloadBlockPrefs.requestUnlock(this)
+                    updateDownloadStrictState()
+                    Toast.makeText(this, "Unlock timer started!", Toast.LENGTH_SHORT).show()
+                }
+                DownloadBlockPrefs.isLocked(this) -> builder.setNegativeButton("Cancel Request") { _, _ ->
+                    DownloadBlockPrefs.cancelRequest(this)
+                    updateDownloadStrictState()
+                    Toast.makeText(this, "Request cancelled.", Toast.LENGTH_SHORT).show()
+                }
+                else -> builder.setPositiveButton("Disable Now") { _, _ ->
+                    DownloadBlockPrefs.clearStrictMode(this)
+                    updateDownloadStrictState()
+                }
+            }
+        } else {
+            // Not locked — show hours input
+            val hoursInput = EditText(this).apply {
+                hint = "Hours delay (e.g. 24). Set 0 to disable."
+                inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                if (currentHours > 0) setText(currentHours.toString())
+            }
+            layout.addView(TextView(this).apply { text = "Lock duration (hours):" })
+            layout.addView(hoursInput)
+            builder.setView(layout)
+            builder.setPositiveButton("Save") { _, _ ->
+                val hours = hoursInput.text.toString().toIntOrNull() ?: 0
+                if (hours <= 0) {
+                    DownloadBlockPrefs.clearStrictMode(this)
+                    Toast.makeText(this, "Download strict mode disabled.", Toast.LENGTH_SHORT).show()
+                } else {
+                    DownloadBlockPrefs.setStrictMode(this, hours)
+                    Toast.makeText(this, "Strict mode set: ${hours}h lock on download blocking.", Toast.LENGTH_SHORT).show()
                 }
                 updateDownloadStrictState()
             }
-            .setNegativeButton("Close", null)
-            .show()
+        }
+
+        builder.setNegativeButton("Close", null)
+        val dialog = builder.create()
+        dialog.setOnDismissListener { h.removeCallbacks(r) }
+        dialog.show()
     }
 
     private fun showGlobalTimeDialog() {
