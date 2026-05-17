@@ -14,6 +14,8 @@ import android.os.Looper
 import android.provider.Settings
 import android.text.TextUtils
 import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -478,3 +480,4 @@ class MainActivity : AppCompatActivity() {
         }
     }
 }
+
