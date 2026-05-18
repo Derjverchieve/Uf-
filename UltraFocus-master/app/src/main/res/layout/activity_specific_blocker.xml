@@ -1,63 +1,166 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="@color/material_dynamic_neutral10"
+    android:background="@color/background"
     android:padding="16dp">
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Advanced Blocker"
-        android:textSize="24sp"
+        android:textSize="22sp"
         android:textStyle="bold"
-        android:textColor="@android:color/black"
-        android:layout_marginBottom="8dp"/>
+        android:textColor="@color/text_primary"
+        android:layout_marginBottom="12dp"/>
 
-    <!-- Tab Buttons — Web is defined here in XML, NOT added programmatically -->
-    <LinearLayout
-        android:id="@+id/tabContainer"
+    <!-- ── Tab buttons ────────────────────────────────────────────────── -->
+    <HorizontalScrollView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
+        android:scrollbars="none"
         android:layout_marginBottom="8dp">
 
-        <Button
-            android:id="@+id/btnTabScreens"
-            android:layout_width="0dp"
-            android:layout_weight="1"
+        <LinearLayout
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Screens"
-            android:layout_marginEnd="2dp"/>
+            android:orientation="horizontal">
 
-        <Button
-            android:id="@+id/btnTabKeywords"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:layout_height="wrap_content"
-            android:layout_marginHorizontal="2dp"
-            android:text="Keywords"/>
+            <Button
+                android:id="@+id/btnTabScreens"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Screens"
+                android:layout_marginEnd="4dp"/>
 
-        <Button
-            android:id="@+id/btnTabWeb"
-            android:layout_width="0dp"
-            android:layout_weight="1"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="2dp"
-            android:text="Web"/>
+            <Button
+                android:id="@+id/btnTabKeywords"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Keywords"
+                android:layout_marginEnd="4dp"/>
 
-    </LinearLayout>
+            <Button
+                android:id="@+id/btnTabWeb"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Web"
+                android:layout_marginEnd="4dp"/>
 
-    <!-- Debug Checkbox -->
+            <Button
+                android:id="@+id/btnTabAllowlist"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Allowlist"/>
+
+        </LinearLayout>
+    </HorizontalScrollView>
+
+    <!-- Debug checkbox (Screens tab only) -->
     <CheckBox
         android:id="@+id/chkDebug"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Debug Mode (Show Class Names)"
+        android:textColor="@color/text_secondary"
+        android:visibility="gone"
         android:layout_marginBottom="4dp"/>
 
-    <!-- Export / Import -->
+    <!-- ── Allowlist controls (visible only on Allowlist tab) ─────────── -->
+    <LinearLayout
+        android:id="@+id/layoutAllowlistControls"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:layout_marginBottom="8dp">
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:cardBackgroundColor="@color/surface"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp"
+            app:strokeColor="@color/card_stroke"
+            app:strokeWidth="1dp"
+            android:layout_marginBottom="8dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <!-- Enable toggle row -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Block All Websites"
+                            android:textSize="16sp"
+                            android:textStyle="bold"
+                            android:textColor="@color/text_primary"/>
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="Only sites you add below (plus Google) will be accessible."
+                            android:textSize="12sp"
+                            android:textColor="@color/text_secondary"/>
+
+                    </LinearLayout>
+
+                    <Switch
+                        android:id="@+id/switchAllowlistEnabled"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"/>
+
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginVertical="10dp"
+                    android:background="@color/card_stroke"/>
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnAllowlistStrict"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:text="Set Allowlist Strict Mode"
+                    android:textSize="13sp"/>
+
+                <TextView
+                    android:id="@+id/txtAllowlistStrictStatus"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text=""
+                    android:textSize="12sp"
+                    android:textColor="@color/text_secondary"/>
+
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+    </LinearLayout>
+
+    <!-- ── Export / Import ────────────────────────────────────────────── -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -77,36 +180,35 @@
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="wrap_content"
-            android:layout_marginStart="2dp"
-            android:text="Import"/>
+            android:text="Import"
+            android:layout_marginStart="2dp"/>
 
     </LinearLayout>
 
-    <!-- Accountability Partner -->
+    <!-- Accountability -->
     <Button
         android:id="@+id/btnAccountability"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Set Accountability Partner (Rose)"
+        android:text="Set Accountability Partner"
         android:layout_marginBottom="8dp"/>
 
-    <!-- Blocked Items List -->
+    <!-- ── Blocked / Allowed items list ──────────────────────────────── -->
     <ListView
         android:id="@+id/listView"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
         android:dividerHeight="1dp"
-        android:background="@android:color/white"/>
+        android:background="@color/surface"/>
 
-    <!-- Add Button -->
+    <!-- FAB -->
     <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
         android:id="@+id/fabAdd"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Add New"
+        android:text="Add Screen"
         android:layout_gravity="end"
-        android:layout_marginTop="16dp"
-        android:backgroundTint="@color/design_default_color_primary"/>
+        android:layout_marginTop="16dp"/>
 
 </LinearLayout>
