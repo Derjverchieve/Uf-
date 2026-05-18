@@ -15,6 +15,7 @@ import devs.org.ultrafocus.utils.ContentBlockManager
 import devs.org.ultrafocus.utils.SoftBlockManager
 import devs.org.ultrafocus.utils.SpecificScreenManager
 import devs.org.ultrafocus.utils.TemporaryAccessManager
+import devs.org.ultrafocus.utils.WebAllowlistManager
 import devs.org.ultrafocus.utils.WebsiteBlockManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
@@ -190,6 +191,22 @@ class BlockerAccessibilityService : AccessibilityService() {
         packageName: String
     ): Boolean {
         val currentUrl = captureBrowserUrl(rootNode, packageName) ?: return false
+
+        // Allowlist mode check — if enabled, block any URL not in the allowlist.
+        // This runs before regular block rules so it acts as a global gate.
+        if (WebAllowlistManager.isBlockedByAllowlist(this, currentUrl)) {
+            val blockKey = WebAllowlistManager::class.java.simpleName
+            val now = System.currentTimeMillis()
+            if (blockKey == lastBlockedWebsiteKey &&
+                now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
+            lastBlockedWebsiteKey = blockKey
+            lastWebsiteBlockTime = now
+            tryRedirectBrowserTab(rootNode, packageName)
+            performGlobalAction(GLOBAL_ACTION_HOME)
+            performRedirectToGoogle()
+            return true
+        }
+
         if (!WebsiteBlockManager.shouldBlockUrl(this, currentUrl)) return false
 
         val blockKey = WebsiteBlockManager.normalizeHost(currentUrl)
