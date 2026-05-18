@@ -100,6 +100,19 @@ class SelectedAppsAdapter(
                 if (pos == RecyclerView.NO_POSITION) return@setOnClickListener
                 val app = list[pos]
                 val currentlySoft = SoftBlockManager.isSoftBlocked(context, app.packageName)
+
+                // BUG FIX: Enabling soft block on a strictly locked app creates a loophole —
+                // the user could pass the easy UUID challenge to access the app, bypassing
+                // the strict mode lock entirely. Soft block is only toggleable when unlocked.
+                if (!currentlySoft && ItemStrictModeManager.isLocked(context, app.packageName)) {
+                    Toast.makeText(
+                        context,
+                        "${app.appName} is strictly locked. Remove the strict mode lock first before switching to soft block.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@setOnClickListener
+                }
+
                 SoftBlockManager.setSoftBlock(context, app.packageName, !currentlySoft)
                 val msg = if (!currentlySoft)
                     "${app.appName} set to soft block — UUID challenge required to open"
@@ -259,4 +272,3 @@ class SelectedAppsAdapter(
         this.onSetTimePeriodCallback = callback
     }
 }
-
