@@ -1,118 +1,127 @@
-package devs.org.ultrafocus.activities
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/softBlockRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:background="@color/background"
+    android:padding="32dp">
 
-import android.annotation.SuppressLint
-import android.content.Intent
-import android.os.Bundle
-import android.view.animation.AnimationUtils
-import android.widget.*
-import androidx.activity.enableEdgeToEdge
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
-import com.google.android.material.button.MaterialButton
-import devs.org.ultrafocus.R
-import devs.org.ultrafocus.utils.SoftBlockManager
-import devs.org.ultrafocus.utils.TemporaryAccessManager
+    <ImageView
+        android:layout_width="72dp"
+        android:layout_height="72dp"
+        android:src="@drawable/ic_shield"
+        android:contentDescription="Soft block"
+        app:tint="@color/soft_block_amber"
+        android:layout_marginBottom="20dp"/>
 
-class SoftBlockActivity : AppCompatActivity() {
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Slow Down"
+        android:textSize="28sp"
+        android:textStyle="bold"
+        android:textColor="@color/text_primary"
+        android:layout_marginBottom="8dp"/>
 
-    private lateinit var blockedPackage: String
-    private lateinit var challengeCode: String
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Type the code below to continue to this app."
+        android:textSize="14sp"
+        android:textColor="@color/text_secondary"
+        android:gravity="center"
+        android:layout_marginBottom="32dp"/>
 
-    private lateinit var tvCode: TextView
-    private lateinit var etInput: EditText
-    private lateinit var tvError: TextView
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:cardBackgroundColor="@color/surface_variant"
+        app:strokeColor="@color/soft_block_amber"
+        app:strokeWidth="1dp"
+        app:cardCornerRadius="12dp"
+        android:layout_marginBottom="24dp">
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        setContentView(R.layout.activity_soft_block)
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="20dp"
+            android:gravity="center">
 
-        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.softBlockRoot)) { v, insets ->
-            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
-            insets
-        }
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="CODE"
+                android:textSize="10sp"
+                android:letterSpacing="0.2"
+                android:textColor="@color/soft_block_amber"
+                android:textStyle="bold"
+                android:layout_marginBottom="10dp"/>
 
-        blockedPackage = intent.getStringExtra("blocked_package") ?: run { goHome(); return }
-        challengeCode  = intent.getStringExtra("challenge_code")  ?: run { goHome(); return }
+            <TextView
+                android:id="@+id/tvChallengeCode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="xxxx   xxxx   xxxx"
+                android:textSize="22sp"
+                android:textStyle="bold"
+                android:textColor="@color/text_primary"
+                android:fontFamily="monospace"
+                android:textIsSelectable="false"
+                android:longClickable="false"/>
 
-        tvCode    = findViewById(R.id.tvChallengeCode)
-        etInput   = findViewById(R.id.etChallengeInput)
-        tvError   = findViewById(R.id.tvChallengeError)
-        val btnSubmit = findViewById<MaterialButton>(R.id.btnSubmitChallenge)
-        val btnCancel = findViewById<MaterialButton>(R.id.btnCancelSoftBlock)
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
 
-        // Belt-and-suspenders paste blocking on top of NoPasteTextInputEditText
-        etInput.isLongClickable = false
+    <com.google.android.material.textfield.TextInputLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Type the code exactly"
+        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+        android:layout_marginBottom="8dp">
 
-        renderChallenge()
+        <devs.org.ultrafocus.utils.NoPasteTextInputEditText
+            android:id="@+id/etChallengeInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="text"
+            android:fontFamily="monospace"
+            android:textSize="16sp"
+            android:longClickable="false"
+            android:imeOptions="actionDone"
+            android:textColor="@color/text_primary"/>
 
-        btnSubmit.setOnClickListener { handleSubmit() }
-        btnCancel.setOnClickListener { goHome() }
+    </com.google.android.material.textfield.TextInputLayout>
 
-        // Allow submitting via IME Done action
-        etInput.setOnEditorActionListener { _, _, _ ->
-            handleSubmit()
-            true
-        }
-    }
+    <TextView
+        android:id="@+id/tvChallengeError"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Incorrect — try again"
+        android:textColor="@color/locked_red"
+        android:textSize="13sp"
+        android:visibility="gone"
+        android:layout_marginBottom="16dp"
+        android:paddingStart="4dp"/>
 
-    private fun renderChallenge() {
-        // Display in groups of 4 chars separated by spaces for readability.
-        // User must type the raw code without spaces — comparison is against challengeCode.
-        tvCode.text = challengeCode.chunked(4).joinToString("   ")
-        tvError.visibility = android.view.View.GONE
-        etInput.text?.clear()
-    }
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnSubmitChallenge"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:text="Continue"
+        android:textSize="15sp"
+        android:layout_marginBottom="12dp"/>
 
-    private fun handleSubmit() {
-        val input = etInput.text.toString().trim()
-        if (input == challengeCode) {
-            // Correct — grant access for the per-app configured duration, then launch.
-            val durationMs = SoftBlockManager.getAccessDurationMinutes(this, blockedPackage) * 60_000L
-            TemporaryAccessManager.grantAccess(blockedPackage, durationMs)
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnCancelSoftBlock"
+        style="@style/Widget.Material3.Button.OutlinedButton"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:text="Go Back"
+        android:textSize="15sp"/>
 
-            val launch = packageManager.getLaunchIntentForPackage(blockedPackage)
-            if (launch != null) {
-                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                startActivity(launch)
-            }
-            finish()
-        } else {
-            tvError.visibility = android.view.View.VISIBLE
-            tvError.text = "Incorrect — try again"
-            etInput.text?.clear()
-            val shake = AnimationUtils.loadAnimation(this, R.anim.shake)
-            etInput.startAnimation(shake)
-        }
-    }
-
-    private fun goHome() {
-        startActivity(Intent(Intent.ACTION_MAIN).apply {
-            addCategory(Intent.CATEGORY_HOME)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        })
-        finish()
-    }
-
-    // If the accessibility service fires again for the same soft-blocked app while
-    // this screen is already showing, onNewIntent delivers a new challenge code.
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        val newPackage = intent.getStringExtra("blocked_package")
-        val newCode    = intent.getStringExtra("challenge_code")
-        if (newCode != null && newPackage != null) {
-            blockedPackage = newPackage
-            challengeCode  = newCode
-            renderChallenge()
-        }
-    }
-
-    @Deprecated("Deprecated in Java")
-    @SuppressLint("MissingSuperCall")
-    override fun onBackPressed() {
-        goHome()
-    }
-}
+</LinearLayout>
