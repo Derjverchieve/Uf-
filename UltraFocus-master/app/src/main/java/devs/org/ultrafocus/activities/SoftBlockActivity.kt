@@ -7,11 +7,11 @@ import android.view.animation.AnimationUtils
 import android.widget.*
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.button.MaterialButton
 import devs.org.ultrafocus.R
+import devs.org.ultrafocus.utils.SoftBlockManager
 import devs.org.ultrafocus.utils.TemporaryAccessManager
 
 class SoftBlockActivity : AppCompatActivity() {
@@ -43,10 +43,12 @@ class SoftBlockActivity : AppCompatActivity() {
         val btnSubmit = findViewById<MaterialButton>(R.id.btnSubmitChallenge)
         val btnCancel = findViewById<MaterialButton>(R.id.btnCancelSoftBlock)
 
+        // Belt-and-suspenders paste blocking on top of NoPasteTextInputEditText
+        etInput.isLongClickable = false
+
         renderChallenge()
 
         btnSubmit.setOnClickListener { handleSubmit() }
-
         btnCancel.setOnClickListener { goHome() }
 
         // Allow submitting via IME Done action
@@ -57,7 +59,8 @@ class SoftBlockActivity : AppCompatActivity() {
     }
 
     private fun renderChallenge() {
-        // Display in groups of 4 chars separated by spaces for readability
+        // Display in groups of 4 chars separated by spaces for readability.
+        // User must type the raw code without spaces — comparison is against challengeCode.
         tvCode.text = challengeCode.chunked(4).joinToString("   ")
         tvError.visibility = android.view.View.GONE
         etInput.text?.clear()
@@ -66,8 +69,10 @@ class SoftBlockActivity : AppCompatActivity() {
     private fun handleSubmit() {
         val input = etInput.text.toString().trim()
         if (input == challengeCode) {
-            // Correct — grant temporary access and open the app
-            TemporaryAccessManager.grantAccess(blockedPackage)
+            // Correct — grant access for the per-app configured duration, then launch.
+            val durationMs = SoftBlockManager.getAccessDurationMinutes(this, blockedPackage) * 60_000L
+            TemporaryAccessManager.grantAccess(blockedPackage, durationMs)
+
             val launch = packageManager.getLaunchIntentForPackage(blockedPackage)
             if (launch != null) {
                 launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -78,7 +83,6 @@ class SoftBlockActivity : AppCompatActivity() {
             tvError.visibility = android.view.View.VISIBLE
             tvError.text = "Incorrect — try again"
             etInput.text?.clear()
-            // Shake the input field to signal failure
             val shake = AnimationUtils.loadAnimation(this, R.anim.shake)
             etInput.startAnimation(shake)
         }
