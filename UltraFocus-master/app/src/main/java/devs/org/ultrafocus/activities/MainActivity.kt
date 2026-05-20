@@ -143,10 +143,6 @@ class MainActivity : AppCompatActivity() {
             showDownloadStrictModeDialog()
         }
 
-        binding.btnAddTimePeriod.setOnClickListener {
-            showGlobalTimeDialog()
-        }
-
         binding.toolbar.setOnMenuItemClickListener { menuItem ->
             if (menuItem.itemId == R.id.done) {
                 showSettingsDialog()
@@ -298,26 +294,6 @@ class MainActivity : AppCompatActivity() {
         val dialog = builder.create()
         dialog.setOnDismissListener { h.removeCallbacks(r) }
         dialog.show()
-    }
-
-    private fun showGlobalTimeDialog() {
-        val input = EditText(this)
-        input.hint = "09:00-12:00, 14:00-18:00"
-
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Global Schedule")
-            .setMessage("Enter time ranges separated by commas.\nExample: 09:00-12:00,14:30-20:00")
-            .setView(input)
-            .setPositiveButton("Save All") { _, _ ->
-                val newConfig = input.text.toString()
-                lifecycleScope.launch {
-                    viewModel.updateBlockedAppsTimePeriod(newConfig, null, "DAILY")
-                    Toast.makeText(this@MainActivity, "Updated all apps!", Toast.LENGTH_SHORT).show()
-                    loadSelectedApps()
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
     }
 
     private fun showTimePeriodDialogForApp(appInfo: AppInfo) {
