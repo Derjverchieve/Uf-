@@ -11,6 +11,11 @@ object TemporaryAccessManager {
         allowedItems[key] = System.currentTimeMillis() + GRACE_PERIOD_MS
     }
 
+    /** Grants access for a specific duration in milliseconds (used by soft block). */
+    fun grantAccess(key: String, durationMs: Long) {
+        allowedItems[key] = System.currentTimeMillis() + durationMs.coerceAtLeast(1_000L)
+    }
+
     fun isAllowed(key: String): Boolean {
         val expiry = allowedItems[key] ?: return false
         return if (System.currentTimeMillis() < expiry) {
