@@ -398,7 +398,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                 try {
                     val intent = if (isSoft) {
                         // Soft block: generate a fresh challenge and send it with the intent
-                        val challenge = SoftBlockManager.generateChallenge()
+                        val challenge = SoftBlockManager.generateChallenge(this@BlockerAccessibilityService, packageName)
                         Intent(this@BlockerAccessibilityService, SoftBlockActivity::class.java).apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
                             putExtra("blocked_package", packageName)
