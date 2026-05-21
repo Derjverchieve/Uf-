@@ -164,6 +164,12 @@ class SelectedAppsAdapter(
                     showItemStrictModeDialog(app)
                     return@setOnClickListener
                 }
+                // Cannot delete while soft block strict mode is locked — deletion
+                // would silently clear the soft block, bypassing the strict lock.
+                if (SoftBlockManager.isSoftBlockLocked(context, app.packageName)) {
+                    showSoftBlockLockDialog(app)
+                    return@setOnClickListener
+                }
                 list.removeAt(pos)
                 notifyItemRemoved(pos)
                 SoftBlockManager.setSoftBlock(context, app.packageName, false)
@@ -189,6 +195,16 @@ class SelectedAppsAdapter(
                     Toast.makeText(
                         context,
                         "${app.appName} is strictly locked. Unlock it before changing the schedule.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@setOnClickListener
+                }
+                // Also block schedule changes while soft block strict mode is locked —
+                // a schedule change could open a window where the app is unblocked.
+                if (SoftBlockManager.isSoftBlockLocked(context, app.packageName)) {
+                    Toast.makeText(
+                        context,
+                        "${app.appName}'s soft block is strictly locked. Unlock it before changing the schedule.",
                         Toast.LENGTH_LONG
                     ).show()
                     return@setOnClickListener
