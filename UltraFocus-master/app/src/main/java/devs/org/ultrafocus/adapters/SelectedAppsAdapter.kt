@@ -395,6 +395,18 @@ class SelectedAppsAdapter(
         private fun showStrictModeSetupDialog(appInfo: AppInfo) {
             val key = appInfo.packageName
 
+            // Cannot arm item strict mode while soft block strict mode is locked —
+            // stacking two independent strict locks on the same app creates
+            // conflicting unlock flows and is not a supported state.
+            if (SoftBlockManager.isSoftBlockLocked(context, key)) {
+                Toast.makeText(
+                    context,
+                    "${appInfo.appName}'s soft block is strictly locked. Unlock it before setting item strict mode.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+
             // BUG FIX: redirect to lock dialog if already locked — prevents editing
             // the delay value to 0 as a bypass while strict mode is active.
             if (ItemStrictModeManager.isLocked(context, key)) {
