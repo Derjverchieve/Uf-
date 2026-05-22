@@ -56,13 +56,6 @@
         android:textSize="15sp"
         style="@style/Widget.Material3.Button.OutlinedButton"/>
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:text="Long press the button above for emergency override"
-        android:textSize="11sp"
-        android:textColor="@color/text_hint"
-        android:gravity="center"/>
+
 
 </LinearLayout>
