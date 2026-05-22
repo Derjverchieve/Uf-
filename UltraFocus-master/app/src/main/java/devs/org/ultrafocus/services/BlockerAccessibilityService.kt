@@ -61,7 +61,7 @@ class BlockerAccessibilityService : AccessibilityService() {
     private var blockedAppInfos: List<devs.org.ultrafocus.model.AppInfo> = emptyList()
 
     private var lastScanTime: Long = 0
-    private val scanIntervalMs = 250L
+    private val scanIntervalMs = 40L
 
     private var lastBlockedPackage: String? = null
     private var lastBlockTime: Long = 0
