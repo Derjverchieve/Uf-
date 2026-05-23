@@ -65,12 +65,12 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     private var lastBlockedPackage: String? = null
     private var lastBlockTime: Long = 0
-    private val blockCooldownMs = 500L
+    private val blockCooldownMs = 100L
 
     // Throttle website blocks
     private var lastBlockedWebsiteKey: String? = null
     private var lastWebsiteBlockTime: Long = 0
-    private val websiteBlockCooldownMs = 1500L
+    private val websiteBlockCooldownMs = 500L
 
     private val escapeKeywords = listOf("Cancel", "Deny", "No", "Close", "Quit", "Back")
 
