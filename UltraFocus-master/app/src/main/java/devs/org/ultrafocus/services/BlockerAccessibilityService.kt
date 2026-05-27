@@ -285,6 +285,8 @@ class BlockerAccessibilityService : AccessibilityService() {
             try {
                 val result = scanNodeTreeForBlockedUrl(child, depth + 1)
                 if (result != null) return result
+            } catch (_: Exception) {
+                // ignore node read errors, keep scanning
             } finally {
                 child.recycle()
             }
@@ -483,4 +485,22 @@ class BlockerAccessibilityService : AccessibilityService() {
                     startActivity(intent)
                     delay(1000)
                     currentlyBlockedApps.remove(packageName)
-                } catch (_: Exception)
+                } catch (_: Exception) {
+                    currentlyBlockedApps.remove(packageName)
+                }
+            }
+        } catch (_: Exception) {
+            currentlyBlockedApps.remove(packageName)
+        }
+    }
+
+    override fun onInterrupt() {}
+
+    override fun onDestroy() {
+        super.onDestroy()
+        serviceScope.cancel()
+        isServiceReady = false
+        currentlyBlockedApps.clear()
+    }
+}
+
