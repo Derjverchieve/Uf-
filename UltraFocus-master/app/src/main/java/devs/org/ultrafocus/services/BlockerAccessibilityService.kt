@@ -61,16 +61,16 @@ class BlockerAccessibilityService : AccessibilityService() {
     private var blockedAppInfos: List<devs.org.ultrafocus.model.AppInfo> = emptyList()
 
     private var lastScanTime: Long = 0
-    private val scanIntervalMs = 20L
+    private val scanIntervalMs = 250L
 
     private var lastBlockedPackage: String? = null
     private var lastBlockTime: Long = 0
-    private val blockCooldownMs = 20L
+    private val blockCooldownMs = 500L
 
     // Throttle website blocks
     private var lastBlockedWebsiteKey: String? = null
     private var lastWebsiteBlockTime: Long = 0
-    private val websiteBlockCooldownMs = 50L
+    private val websiteBlockCooldownMs = 1500L
 
     private val escapeKeywords = listOf("Cancel", "Deny", "No", "Close", "Quit", "Back")
 
@@ -186,42 +186,111 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     // ── URL scanning ─────────────────────────────────────────────────────────
+
+    // Matches any URL-like string — used by the tree scan to avoid false
+    // positives from plain prose text that happens to mention a domain.
+    private val urlLikeRegex = Regex(
+        """(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+(?:\.[a-zA-Z]{2,})+)(?:/\S*)?"""
+    )
+
     private fun scanForBlockedUrls(
         rootNode: AccessibilityNodeInfo,
         packageName: String
     ): Boolean {
-        val currentUrl = captureBrowserUrl(rootNode, packageName) ?: return false
+        val now = System.currentTimeMillis()
 
-        // Allowlist mode check — if enabled, block any URL not in the allowlist.
-        // This runs before regular block rules so it acts as a global gate.
-        if (WebAllowlistManager.isBlockedByAllowlist(this, currentUrl)) {
-            val blockKey = WebAllowlistManager::class.java.simpleName
-            val now = System.currentTimeMillis()
-            if (blockKey == lastBlockedWebsiteKey &&
+        // ── Primary check: address bar ────────────────────────────────────────
+        val currentUrl = captureBrowserUrl(rootNode, packageName)
+        if (currentUrl != null) {
+            if (WebAllowlistManager.isBlockedByAllowlist(this, currentUrl)) {
+                val blockKey = WebAllowlistManager::class.java.simpleName
+                if (blockKey == lastBlockedWebsiteKey &&
+                    now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
+                lastBlockedWebsiteKey = blockKey
+                lastWebsiteBlockTime = now
+                tryRedirectBrowserTab(rootNode, packageName)
+                performGlobalAction(GLOBAL_ACTION_HOME)
+                performRedirectToGoogle()
+                return true
+            }
+            if (WebsiteBlockManager.shouldBlockUrl(this, currentUrl)) {
+                val blockKey = WebsiteBlockManager.normalizeHost(currentUrl)
+                if (blockKey == lastBlockedWebsiteKey &&
+                    now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
+                lastBlockedWebsiteKey = blockKey
+                lastWebsiteBlockTime = now
+                tryRedirectBrowserTab(rootNode, packageName)
+                performGlobalAction(GLOBAL_ACTION_HOME)
+                performRedirectToGoogle()
+                return true
+            }
+        }
+
+        // ── Secondary check: full tree scan ───────────────────────────────────
+        // Catches browser "preview" / "peek" overlays and Custom Tabs that load
+        // page content without updating the address bar. Recursively walks every
+        // AccessibilityNodeInfo in the browser window and checks any URL-shaped
+        // text against block rules. Uses a regex filter so random prose text that
+        // happens to mention a word doesn't produce false positives.
+        val treeBlockKey = scanNodeTreeForBlockedUrl(rootNode)
+        if (treeBlockKey != null) {
+            if (treeBlockKey == lastBlockedWebsiteKey &&
                 now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
-            lastBlockedWebsiteKey = blockKey
+            lastBlockedWebsiteKey = treeBlockKey
             lastWebsiteBlockTime = now
-            tryRedirectBrowserTab(rootNode, packageName)
+            // Cannot rewrite an address bar that isn't visible — just go home.
+            performGlobalAction(GLOBAL_ACTION_BACK)
             performGlobalAction(GLOBAL_ACTION_HOME)
             performRedirectToGoogle()
             return true
         }
 
-        if (!WebsiteBlockManager.shouldBlockUrl(this, currentUrl)) return false
+        return false
+    }
 
-        val blockKey = WebsiteBlockManager.normalizeHost(currentUrl)
-        val now = System.currentTimeMillis()
-        if (blockKey == lastBlockedWebsiteKey &&
-            now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
+    /**
+     * Recursively walks the accessibility tree looking for any text that both
+     * looks like a URL and matches a block rule. Returns the normalized block key
+     * if found, null otherwise.
+     *
+     * Depth is capped at 20 to avoid stack issues on pathologically deep trees.
+     * The urlLikeRegex filter ensures only domain-shaped strings are evaluated —
+     * plain prose sentences won't trigger a false positive even if they mention
+     * a site name in passing.
+     */
+    private fun scanNodeTreeForBlockedUrl(
+        node: AccessibilityNodeInfo,
+        depth: Int = 0
+    ): String? {
+        if (depth > 20) return null
 
-        lastBlockedWebsiteKey = blockKey
-        lastWebsiteBlockTime = now
+        val text = node.text?.toString()?.trim().orEmpty()
+        val desc = node.contentDescription?.toString()?.trim().orEmpty()
 
-        tryRedirectBrowserTab(rootNode, packageName)
-        performGlobalAction(GLOBAL_ACTION_HOME)
-        performRedirectToGoogle()
+        for (candidate in listOf(text, desc)) {
+            if (candidate.length < 6) continue
+            for (match in urlLikeRegex.findAll(candidate)) {
+                val url = match.value
+                if (WebAllowlistManager.isBlockedByAllowlist(this, url)) {
+                    return WebAllowlistManager::class.java.simpleName
+                }
+                if (WebsiteBlockManager.shouldBlockUrl(this, url)) {
+                    return WebsiteBlockManager.normalizeHost(url)
+                }
+            }
+        }
 
-        return true
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            try {
+                val result = scanNodeTreeForBlockedUrl(child, depth + 1)
+                if (result != null) return result
+            } finally {
+                child.recycle()
+            }
+        }
+
+        return null
     }
 
     private fun tryRedirectBrowserTab(
@@ -414,21 +483,4 @@ class BlockerAccessibilityService : AccessibilityService() {
                     startActivity(intent)
                     delay(1000)
                     currentlyBlockedApps.remove(packageName)
-                } catch (_: Exception) {
-                    currentlyBlockedApps.remove(packageName)
-                }
-            }
-        } catch (_: Exception) {
-            currentlyBlockedApps.remove(packageName)
-        }
-    }
-
-    override fun onInterrupt() {}
-
-    override fun onDestroy() {
-        super.onDestroy()
-        serviceScope.cancel()
-        isServiceReady = false
-        currentlyBlockedApps.clear()
-    }
-}
+                } catch (_: Exception)
