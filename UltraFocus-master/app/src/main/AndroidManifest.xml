@@ -13,6 +13,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES"/>
+
     <application
         android:name=".UltraFocusApp"
         android:allowBackup="true"
@@ -33,12 +34,16 @@
 
         <activity android:name=".activities.SelectAppActivity" android:exported="false" />
 
+        <!-- resizeableActivity=false forces Android to exit split screen when
+             BlockedAppActivity launches, since non-resizeable activities cannot
+             participate in split screen mode. -->
         <activity
             android:name=".activities.BlockedAppActivity"
             android:launchMode="singleTask"
             android:taskAffinity=""
             android:excludeFromRecents="true"
             android:noHistory="true"
+            android:resizeableActivity="false"
             android:exported="false" />
 
         <activity
@@ -47,6 +52,7 @@
             android:taskAffinity=""
             android:excludeFromRecents="true"
             android:noHistory="true"
+            android:resizeableActivity="false"
             android:exported="false" />
 
         <activity
