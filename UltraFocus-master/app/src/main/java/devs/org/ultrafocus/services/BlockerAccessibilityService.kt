@@ -160,39 +160,9 @@ class BlockerAccessibilityService : AccessibilityService() {
         // 1. Self-immunity
         if (packageName == this.packageName) return
 
-        // 1b. Split screen dangerous-package guard.
-        // TYPE_WINDOWS_CHANGED fires whenever the window list changes — including
-        // when split screen is entered or an app is added to a split pane.
-        // If we see 2+ visible windows and any of them belong to a dangerous
-        // package (Play Store, package installer etc.), kill that package's
-        // process and go home. We only act in split screen (windows.size >= 2)
-        // so single-window Play Store use (e.g. legitimate updates) is unaffected.
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
-            val visibleWindows = windows ?: emptyList()
-            if (visibleWindows.size >= 2) {
-                val dangerousWindow = visibleWindows.firstOrNull { window ->
-                    val pkg = window.root?.packageName?.toString() ?: ""
-                    isDangerousPackage(pkg)
-                }
-                if (dangerousWindow != null) {
-                    val dangerousPkg = dangerousWindow.root?.packageName?.toString() ?: ""
-                    // 1. Exit split screen and go home
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                    performGlobalAction(GLOBAL_ACTION_HOME)
-                    // 2. Kill the process so it doesn't linger in recents
-                    try {
-                        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-                        am.killBackgroundProcesses(dangerousPkg)
-                    } catch (_: Exception) {}
-                    // 3. Go home again after the kill to ensure clean state
-                    serviceScope.launch {
-                        delay(300)
-                        performGlobalAction(GLOBAL_ACTION_HOME)
-                    }
-                    return
-                }
-            }
-        }
+        // 1b. Split screen dangerous-package guard — checked inside the throttled
+        // scan loop below so it runs every 50ms rather than relying on
+        // TYPE_WINDOWS_CHANGED alone (unreliable on some OEMs).
 
         // 2. Ultra Power / system settings trap
         if (packageName == "com.android.systemui" || packageName.contains("settings")) {
@@ -228,6 +198,37 @@ class BlockerAccessibilityService : AccessibilityService() {
             val currentTime = System.currentTimeMillis()
             if (currentTime - lastScanTime > scanIntervalMs) {
                 lastScanTime = currentTime
+
+                // ── Split screen dangerous-package guard ──────────────────────
+                // Check the live window list every scan tick. Only acts when
+                // 2+ windows are visible (split screen / multi-window) so
+                // single-window Play Store use is completely unaffected.
+                val visibleWindows = windows
+                if (!visibleWindows.isNullOrEmpty() && visibleWindows.size >= 2) {
+                    val dangerousPkg = visibleWindows
+                        .mapNotNull { it.root?.packageName?.toString() }
+                        .firstOrNull { isDangerousPackage(it) }
+                    if (dangerousPkg != null) {
+                        // Step 1: back + home to collapse split screen
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        performGlobalAction(GLOBAL_ACTION_HOME)
+                        // Step 2: kill the process so it doesn't linger in recents
+                        try {
+                            val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                            am.killBackgroundProcesses(dangerousPkg)
+                        } catch (_: Exception) {}
+                        // Step 3: recents → home — the reliable OEM-agnostic way
+                        // to fully collapse split screen on most Android variants
+                        serviceScope.launch {
+                            delay(200)
+                            performGlobalAction(GLOBAL_ACTION_RECENTS)
+                            delay(200)
+                            performGlobalAction(GLOBAL_ACTION_HOME)
+                        }
+                        return
+                    }
+                }
+                // ─────────────────────────────────────────────────────────────
                 val rootNode = rootInActiveWindow ?: event.source
                 if (rootNode != null) {
                     if (browserPackages.contains(packageName)) {
