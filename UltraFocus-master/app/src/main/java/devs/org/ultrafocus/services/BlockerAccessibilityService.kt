@@ -2,6 +2,8 @@ package devs.org.ultrafocus.services
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -16,6 +18,7 @@ import devs.org.ultrafocus.utils.SoftBlockManager
 import devs.org.ultrafocus.utils.SpecificScreenManager
 import devs.org.ultrafocus.utils.TemporaryAccessManager
 import devs.org.ultrafocus.utils.WebAllowlistManager
+import devs.org.ultrafocus.utils.WebBlockMode
 import devs.org.ultrafocus.utils.WebsiteBlockManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
@@ -60,8 +63,12 @@ class BlockerAccessibilityService : AccessibilityService() {
     private val currentlyBlockedApps = mutableSetOf<String>()
     private var blockedAppInfos: List<devs.org.ultrafocus.model.AppInfo> = emptyList()
 
+    // Cached set of blocked hostnames — kept in sync with WebsiteBlockManager.
+    // Used by scanForBlockedContent so reader/preview mode can't bypass URL detection.
+    @Volatile private var blockedHostsCache: Set<String> = emptySet()
+
     private var lastScanTime: Long = 0
-    private val scanIntervalMs = 250L
+    private val scanIntervalMs = 50L
 
     private var lastBlockedPackage: String? = null
     private var lastBlockTime: Long = 0
@@ -73,6 +80,26 @@ class BlockerAccessibilityService : AccessibilityService() {
     private val websiteBlockCooldownMs = 1500L
 
     private val escapeKeywords = listOf("Cancel", "Deny", "No", "Close", "Quit", "Back")
+
+    /**
+     * Packages that could be used to uninstall UltraFocus or install bypass apps.
+     * Only acted on when detected in split screen — single-window use is fine
+     * (e.g. updating apps legitimately). Split screen is the specific exploit
+     * because it lets these apps run alongside a blocked app simultaneously.
+     */
+    private val dangerousPackages = setOf(
+        "com.android.vending",                   // Play Store
+        "com.android.packageinstaller",          // Stock package installer
+        "com.google.android.packageinstaller",   // Google package installer
+        "com.transsion.packageinstaller",        // Transsion variant
+        "com.miui.packageinstaller",             // MIUI variant
+        "com.samsung.android.packageinstaller"  // Samsung variant
+    )
+
+    private fun isDangerousPackage(pkg: String) =
+        dangerousPackages.contains(pkg) ||
+        pkg.contains("packageinstaller", ignoreCase = true) ||
+        pkg.contains("packagemanager", ignoreCase = true)
 
     // ── Lifecycle ────────────────────────────────────────────────────────────
     override fun onServiceConnected() {
@@ -109,6 +136,18 @@ class BlockerAccessibilityService : AccessibilityService() {
                 }
             } catch (_: Exception) {}
         }
+        // Refresh blocked hostname cache for reader-mode detection.
+        // Runs on a background thread since SharedPreferences reads are fast
+        // but we don't want to block the main thread on startup.
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val hosts = WebsiteBlockManager.getRules(this@BlockerAccessibilityService)
+                    .filter { it.mode == WebBlockMode.GENERAL }
+                    .map { it.host }
+                    .toSet()
+                blockedHostsCache = hosts
+            } catch (_: Exception) {}
+        }
     }
 
     // ── Main event handler ───────────────────────────────────────────────────
@@ -120,6 +159,40 @@ class BlockerAccessibilityService : AccessibilityService() {
 
         // 1. Self-immunity
         if (packageName == this.packageName) return
+
+        // 1b. Split screen dangerous-package guard.
+        // TYPE_WINDOWS_CHANGED fires whenever the window list changes — including
+        // when split screen is entered or an app is added to a split pane.
+        // If we see 2+ visible windows and any of them belong to a dangerous
+        // package (Play Store, package installer etc.), kill that package's
+        // process and go home. We only act in split screen (windows.size >= 2)
+        // so single-window Play Store use (e.g. legitimate updates) is unaffected.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+            val visibleWindows = windows ?: emptyList()
+            if (visibleWindows.size >= 2) {
+                val dangerousWindow = visibleWindows.firstOrNull { window ->
+                    val pkg = window.root?.packageName?.toString() ?: ""
+                    isDangerousPackage(pkg)
+                }
+                if (dangerousWindow != null) {
+                    val dangerousPkg = dangerousWindow.root?.packageName?.toString() ?: ""
+                    // 1. Exit split screen and go home
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    performGlobalAction(GLOBAL_ACTION_HOME)
+                    // 2. Kill the process so it doesn't linger in recents
+                    try {
+                        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                        am.killBackgroundProcesses(dangerousPkg)
+                    } catch (_: Exception) {}
+                    // 3. Go home again after the kill to ensure clean state
+                    serviceScope.launch {
+                        delay(300)
+                        performGlobalAction(GLOBAL_ACTION_HOME)
+                    }
+                    return
+                }
+            }
+        }
 
         // 2. Ultra Power / system settings trap
         if (packageName == "com.android.systemui" || packageName.contains("settings")) {
@@ -161,7 +234,8 @@ class BlockerAccessibilityService : AccessibilityService() {
                         if (scanForBlockedUrls(rootNode, packageName)) return
                     }
                     val rootPkg = rootNode.packageName?.toString().orEmpty()
-                    if (rootPkg != this.packageName && scanForBlockedContent(rootNode)) {
+                    if (rootPkg != this.packageName &&
+                        scanForBlockedContent(rootNode, packageName)) {
                         performBlock(packageName)
                         return
                     }
@@ -186,113 +260,42 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     // ── URL scanning ─────────────────────────────────────────────────────────
-
-    // Matches any URL-like string — used by the tree scan to avoid false
-    // positives from plain prose text that happens to mention a domain.
-    private val urlLikeRegex = Regex(
-        """(?:https?://)?(?:www\.)?([a-zA-Z0-9\-]+(?:\.[a-zA-Z]{2,})+)(?:/\S*)?"""
-    )
-
     private fun scanForBlockedUrls(
         rootNode: AccessibilityNodeInfo,
         packageName: String
     ): Boolean {
-        val now = System.currentTimeMillis()
+        val currentUrl = captureBrowserUrl(rootNode, packageName) ?: return false
 
-        // ── Primary check: address bar ────────────────────────────────────────
-        val currentUrl = captureBrowserUrl(rootNode, packageName)
-        if (currentUrl != null) {
-            if (WebAllowlistManager.isBlockedByAllowlist(this, currentUrl)) {
-                val blockKey = WebAllowlistManager::class.java.simpleName
-                if (blockKey == lastBlockedWebsiteKey &&
-                    now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
-                lastBlockedWebsiteKey = blockKey
-                lastWebsiteBlockTime = now
-                tryRedirectBrowserTab(rootNode, packageName)
-                performGlobalAction(GLOBAL_ACTION_HOME)
-                performRedirectToGoogle()
-                return true
-            }
-            if (WebsiteBlockManager.shouldBlockUrl(this, currentUrl)) {
-                val blockKey = WebsiteBlockManager.normalizeHost(currentUrl)
-                if (blockKey == lastBlockedWebsiteKey &&
-                    now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
-                lastBlockedWebsiteKey = blockKey
-                lastWebsiteBlockTime = now
-                tryRedirectBrowserTab(rootNode, packageName)
-                performGlobalAction(GLOBAL_ACTION_HOME)
-                performRedirectToGoogle()
-                return true
-            }
-        }
-
-        // ── Secondary check: full tree scan ───────────────────────────────────
-        // Catches browser "preview" / "peek" overlays and Custom Tabs that load
-        // page content without updating the address bar. Recursively walks every
-        // AccessibilityNodeInfo in the browser window and checks any URL-shaped
-        // text against block rules. Uses a regex filter so random prose text that
-        // happens to mention a word doesn't produce false positives.
-        val treeBlockKey = scanNodeTreeForBlockedUrl(rootNode)
-        if (treeBlockKey != null) {
-            if (treeBlockKey == lastBlockedWebsiteKey &&
+        // Allowlist mode check — if enabled, block any URL not in the allowlist.
+        // This runs before regular block rules so it acts as a global gate.
+        if (WebAllowlistManager.isBlockedByAllowlist(this, currentUrl)) {
+            val blockKey = WebAllowlistManager::class.java.simpleName
+            val now = System.currentTimeMillis()
+            if (blockKey == lastBlockedWebsiteKey &&
                 now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
-            lastBlockedWebsiteKey = treeBlockKey
+            lastBlockedWebsiteKey = blockKey
             lastWebsiteBlockTime = now
-            // Cannot rewrite an address bar that isn't visible — just go home.
-            performGlobalAction(GLOBAL_ACTION_BACK)
+            tryRedirectBrowserTab(rootNode, packageName)
             performGlobalAction(GLOBAL_ACTION_HOME)
             performRedirectToGoogle()
             return true
         }
 
-        return false
-    }
+        if (!WebsiteBlockManager.shouldBlockUrl(this, currentUrl)) return false
 
-    /**
-     * Recursively walks the accessibility tree looking for any text that both
-     * looks like a URL and matches a block rule. Returns the normalized block key
-     * if found, null otherwise.
-     *
-     * Depth is capped at 20 to avoid stack issues on pathologically deep trees.
-     * The urlLikeRegex filter ensures only domain-shaped strings are evaluated —
-     * plain prose sentences won't trigger a false positive even if they mention
-     * a site name in passing.
-     */
-    private fun scanNodeTreeForBlockedUrl(
-        node: AccessibilityNodeInfo,
-        depth: Int = 0
-    ): String? {
-        if (depth > 20) return null
+        val blockKey = WebsiteBlockManager.normalizeHost(currentUrl)
+        val now = System.currentTimeMillis()
+        if (blockKey == lastBlockedWebsiteKey &&
+            now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
 
-        val text = node.text?.toString()?.trim().orEmpty()
-        val desc = node.contentDescription?.toString()?.trim().orEmpty()
+        lastBlockedWebsiteKey = blockKey
+        lastWebsiteBlockTime = now
 
-        for (candidate in listOf(text, desc)) {
-            if (candidate.length < 6) continue
-            for (match in urlLikeRegex.findAll(candidate)) {
-                val url = match.value
-                if (WebAllowlistManager.isBlockedByAllowlist(this, url)) {
-                    return WebAllowlistManager::class.java.simpleName
-                }
-                if (WebsiteBlockManager.shouldBlockUrl(this, url)) {
-                    return WebsiteBlockManager.normalizeHost(url)
-                }
-            }
-        }
+        tryRedirectBrowserTab(rootNode, packageName)
+        performGlobalAction(GLOBAL_ACTION_HOME)
+        performRedirectToGoogle()
 
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            try {
-                val result = scanNodeTreeForBlockedUrl(child, depth + 1)
-                if (result != null) return result
-            } catch (_: Exception) {
-                // ignore node read errors, keep scanning
-            } finally {
-                child.recycle()
-            }
-        }
-
-        return null
+        return true
     }
 
     private fun tryRedirectBrowserTab(
@@ -415,19 +418,45 @@ class BlockerAccessibilityService : AccessibilityService() {
         } catch (_: Exception) {}
     }
 
-    private fun scanForBlockedContent(node: AccessibilityNodeInfo): Boolean {
+    /**
+     * Recursively scans all visible text nodes for:
+     * 1. Blocked keywords (existing behaviour).
+     * 2. Blocked hostnames — catches reader mode / preview mode / offline cache
+     *    where the URL bar doesn't update but the page content is still visible.
+     *    Only runs the hostname check when a known browser package is in the
+     *    foreground to avoid false positives in other apps.
+     */
+    private fun scanForBlockedContent(
+        node: AccessibilityNodeInfo,
+        foregroundPackage: String = ""
+    ): Boolean {
         if (!node.isVisibleToUser) return false
+
         val text = node.text?.toString()
+        val desc = node.contentDescription?.toString()
+
+        // Keyword check
         if (!text.isNullOrEmpty() &&
             ContentBlockManager.containsBlockedContent(this, text)) return true
-        val desc = node.contentDescription?.toString()
         if (!desc.isNullOrEmpty() &&
             ContentBlockManager.containsBlockedContent(this, desc)) return true
+
+        // Hostname check — only in browsers and only when cache is populated
+        if (browserPackages.contains(foregroundPackage) &&
+            blockedHostsCache.isNotEmpty()) {
+            val combined = listOfNotNull(text, desc).joinToString(" ").lowercase()
+            if (combined.isNotBlank()) {
+                for (host in blockedHostsCache) {
+                    if (combined.contains(host)) return true
+                }
+            }
+        }
+
         val childCount = node.childCount
         for (i in 0 until childCount) {
             val child = node.getChild(i)
             if (child != null) {
-                if (scanForBlockedContent(child)) return true
+                if (scanForBlockedContent(child, foregroundPackage)) return true
                 child.recycle()
             }
         }
@@ -503,4 +532,3 @@ class BlockerAccessibilityService : AccessibilityService() {
         currentlyBlockedApps.clear()
     }
 }
-
