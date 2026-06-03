@@ -204,8 +204,17 @@ class BlockerAccessibilityService : AccessibilityService() {
                 // 2+ windows are visible (split screen / multi-window) so
                 // single-window Play Store use is completely unaffected.
                 val visibleWindows = windows
-                if (!visibleWindows.isNullOrEmpty() && visibleWindows.size >= 2) {
-                    val dangerousPkg = visibleWindows
+                // True split screen is indicated by the presence of a
+                // TYPE_SPLIT_SCREEN_DIVIDER window. Checking windows.size >= 2
+                // alone is wrong — overlay dialogs (like the uninstall dialog)
+                // also produce 2+ windows without being split screen.
+                val isRealSplitScreen = !visibleWindows.isNullOrEmpty() &&
+                    visibleWindows.any { window ->
+                        window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER
+                    }
+
+                if (isRealSplitScreen) {
+                    val dangerousPkg = visibleWindows!!
                         .mapNotNull { it.root?.packageName?.toString() }
                         .firstOrNull { isDangerousPackage(it) }
                     if (dangerousPkg != null) {
@@ -217,8 +226,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                             val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
                             am.killBackgroundProcesses(dangerousPkg)
                         } catch (_: Exception) {}
-                        // Step 3: recents → home — the reliable OEM-agnostic way
-                        // to fully collapse split screen on most Android variants
+                        // Step 3: recents → home — reliable OEM-agnostic split screen collapse
                         serviceScope.launch {
                             delay(200)
                             performGlobalAction(GLOBAL_ACTION_RECENTS)
