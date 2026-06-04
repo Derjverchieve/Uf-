@@ -55,6 +55,29 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     private val browserPackages = browserConfigs.map { it.packageName }.toSet()
 
+    /**
+     * Packages that are NEVER subject to keyword or hostname content scanning.
+     * These are system-level packages where a false positive would break core
+     * device functionality (can't use keyboard, home screen, notifications etc.)
+     *
+     * Note: these packages CAN still be added to the explicit blocked apps list
+     * by the user — the exemption only applies to content scanning.
+     */
+    private val contentScanExemptPackages = setOf(
+        "com.android.systemui",                      // Notification shade, status bar
+        "com.android.launcher3",                     // Stock launcher
+        "com.google.android.apps.nexuslauncher",     // Pixel launcher
+        "com.transsion.xlauncher",                   // Transsion/HiOS launcher
+        "com.hihonor.android.launcher",              // Honor launcher
+        "com.miui.home",                             // MIUI launcher
+        "com.sec.android.app.launcher",              // Samsung launcher
+        "com.android.inputmethod.latin",             // AOSP keyboard
+        "com.google.android.inputmethod.latin",      // Gboard
+        "com.samsung.android.honeyboard",            // Samsung keyboard
+        "com.swiftkey.swiftkeyapp",                  // SwiftKey
+        "com.transsion.inputmethod"                  // Transsion keyboard
+    )
+
     // ── State ────────────────────────────────────────────────────────────────
     private lateinit var appRepository: AppRepository
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -100,6 +123,33 @@ class BlockerAccessibilityService : AccessibilityService() {
         dangerousPackages.contains(pkg) ||
         pkg.contains("packageinstaller", ignoreCase = true) ||
         pkg.contains("packagemanager", ignoreCase = true)
+
+    /**
+     * Returns true only when the browser is showing an actual web page —
+     * i.e., the address bar view exists in the accessibility tree.
+     *
+     * When false, we're in a browser-internal UI screen (tab switcher, tab
+     * groups, new tab page, downloads, history, bookmarks, settings) where
+     * blocked domain names appearing as tab titles or history entries must NOT
+     * trigger a block — doing so was causing the tab groups false positive.
+     */
+    private fun isBrowserInPageView(
+        rootNode: AccessibilityNodeInfo,
+        packageName: String
+    ): Boolean {
+        val config = browserConfigs.firstOrNull { it.packageName == packageName }
+            ?: return false
+        for (viewId in config.addressBarIds) {
+            val nodes = try {
+                rootNode.findAccessibilityNodeInfosByViewId(viewId)
+            } catch (_: Exception) { null }
+            if (!nodes.isNullOrEmpty()) {
+                nodes.forEach { runCatching { it.recycle() } }
+                return true
+            }
+        }
+        return false
+    }
 
     // ── Lifecycle ────────────────────────────────────────────────────────────
     override fun onServiceConnected() {
@@ -239,14 +289,35 @@ class BlockerAccessibilityService : AccessibilityService() {
                 // ─────────────────────────────────────────────────────────────
                 val rootNode = rootInActiveWindow ?: event.source
                 if (rootNode != null) {
-                    if (browserPackages.contains(packageName)) {
-                        if (scanForBlockedUrls(rootNode, packageName)) return
-                    }
                     val rootPkg = rootNode.packageName?.toString().orEmpty()
-                    if (rootPkg != this.packageName &&
-                        scanForBlockedContent(rootNode, packageName)) {
-                        performBlock(packageName)
-                        return
+                    if (rootPkg == this.packageName) return
+
+                    if (browserPackages.contains(packageName)) {
+                        // ── Browser scan ──────────────────────────────────────
+                        // URL check first — handles normal browsing.
+                        if (scanForBlockedUrls(rootNode, packageName)) return
+
+                        // Hostname content check — only when the address bar view
+                        // EXISTS in the tree (i.e. we are viewing an actual page).
+                        // Skipped for tab switcher / tab groups / history /
+                        // bookmarks / browser settings — those screens don't have
+                        // an address bar node and were causing false positives by
+                        // matching blocked domain names in tab titles and entries.
+                        val inPageView = isBrowserInPageView(rootNode, packageName)
+                        if (inPageView && scanForBlockedContent(rootNode, packageName, hostnameCheck = true)) {
+                            performBlock(packageName)
+                            return
+                        }
+                    } else {
+                        // ── Non-browser content / keyword scan ────────────────
+                        // Exempt system packages (launcher, keyboard, systemui,
+                        // notification shade) — a false keyword match there would
+                        // block core device functionality.
+                        if (!contentScanExemptPackages.contains(packageName) &&
+                            scanForBlockedContent(rootNode, packageName, hostnameCheck = false)) {
+                            performBlock(packageName)
+                            return
+                        }
                     }
                 }
             }
@@ -428,31 +499,37 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Recursively scans all visible text nodes for:
-     * 1. Blocked keywords (existing behaviour).
-     * 2. Blocked hostnames — catches reader mode / preview mode / offline cache
-     *    where the URL bar doesn't update but the page content is still visible.
-     *    Only runs the hostname check when a known browser package is in the
-     *    foreground to avoid false positives in other apps.
+     * Recursively scans visible text nodes for blocked keywords and, optionally,
+     * blocked hostnames.
+     *
+     * hostnameCheck is only true when called for a browser that is confirmed to
+     * be showing an actual web page (address bar exists). This prevents tab
+     * groups, history, search results, and other browser UI from triggering
+     * false positives, while still catching reader mode / preview mode where
+     * a blocked domain's content is rendered without the URL bar updating.
+     *
+     * For non-browser packages, hostnameCheck is always false — keyword blocking
+     * is intentional for any app, but hostname matching outside a browser context
+     * would produce constant false positives.
      */
     private fun scanForBlockedContent(
         node: AccessibilityNodeInfo,
-        foregroundPackage: String = ""
+        foregroundPackage: String = "",
+        hostnameCheck: Boolean = false
     ): Boolean {
         if (!node.isVisibleToUser) return false
 
         val text = node.text?.toString()
         val desc = node.contentDescription?.toString()
 
-        // Keyword check
+        // Keyword check — runs for all non-exempt packages
         if (!text.isNullOrEmpty() &&
             ContentBlockManager.containsBlockedContent(this, text)) return true
         if (!desc.isNullOrEmpty() &&
             ContentBlockManager.containsBlockedContent(this, desc)) return true
 
-        // Hostname check — only in browsers and only when cache is populated
-        if (browserPackages.contains(foregroundPackage) &&
-            blockedHostsCache.isNotEmpty()) {
+        // Hostname check — only in page-view browser contexts
+        if (hostnameCheck && blockedHostsCache.isNotEmpty()) {
             val combined = listOfNotNull(text, desc).joinToString(" ").lowercase()
             if (combined.isNotBlank()) {
                 for (host in blockedHostsCache) {
@@ -465,7 +542,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         for (i in 0 until childCount) {
             val child = node.getChild(i)
             if (child != null) {
-                if (scanForBlockedContent(child, foregroundPackage)) return true
+                if (scanForBlockedContent(child, foregroundPackage, hostnameCheck)) return true
                 child.recycle()
             }
         }
