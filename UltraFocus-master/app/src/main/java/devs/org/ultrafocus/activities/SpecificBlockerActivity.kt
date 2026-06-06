@@ -35,6 +35,11 @@ class SpecificBlockerActivity : AppCompatActivity() {
     private lateinit var btnAllowlistStrict: Button
     private lateinit var txtAllowlistStrictStatus: TextView
 
+    // Cache of web rules in the order shown — used for position-based deletion
+    // so the display format ("reddit.com [09:00-17:00] 🔒") doesn't need to be
+    // reverse-parsed back into a rule for deleteItem.
+    private var cachedWebRules: List<WebBlockRule> = emptyList()
+
     private var currentTab = 0
 
     private val exportLauncher = registerForActivityResult(
@@ -126,10 +131,18 @@ class SpecificBlockerActivity : AppCompatActivity() {
 
         listView.setOnItemClickListener { _, _, position, _ ->
             val itemRaw = adapter.getItem(position) ?: return@setOnItemClickListener
-            if (currentTab == 3) {
-                handleAllowlistDelete(extractItemKey(itemRaw))
-            } else {
-                handleItemDelete(extractItemKey(itemRaw))
+            when {
+                currentTab == 3 -> handleAllowlistDelete(extractItemKey(itemRaw))
+                currentTab == 2 -> {
+                    // Web tab uses position-based lookup so the display label
+                    // (which includes schedule and strict mode icons) doesn't
+                    // need to be reverse-parsed back to a rule key.
+                    val rule = cachedWebRules.getOrNull(position) ?: return@setOnItemClickListener
+                    val strictKey = if (rule.mode == WebBlockMode.SPECIFIC)
+                        rule.host + rule.path else rule.host
+                    handleWebRuleDelete(rule, strictKey)
+                }
+                else -> handleItemDelete(extractItemKey(itemRaw))
             }
         }
 
@@ -243,6 +256,25 @@ class SpecificBlockerActivity : AppCompatActivity() {
         val dialog = builder.create()
         dialog.setOnDismissListener { h.removeCallbacks(r) }
         dialog.show()
+    }
+
+    private fun handleWebRuleDelete(rule: WebBlockRule, strictKey: String) {
+        if (ItemStrictModeManager.isLocked(this, strictKey)) {
+            showItemStrictModeDialog(strictKey)
+            return
+        }
+        val label = if (rule.mode == WebBlockMode.SPECIFIC)
+            "${rule.host}${rule.path}" else rule.host
+        AlertDialog.Builder(this)
+            .setTitle("Delete")
+            .setMessage("Remove \"$label\"?")
+            .setPositiveButton("Delete") { _, _ ->
+                WebsiteBlockManager.removeSite(this, label, rule.mode)
+                ItemStrictModeManager.clearItem(this, strictKey)
+                refreshList()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun handleAllowlistDelete(host: String) {
@@ -380,6 +412,11 @@ class SpecificBlockerActivity : AppCompatActivity() {
 
         val timeInput = EditText(this).apply {
             hint = "Schedule (optional, e.g. 09:00-17:00)"
+            // TYPE_TEXT_FLAG_NO_SUGGESTIONS prevents phone keyboards from
+            // auto-replacing the ASCII hyphen with an en-dash or em-dash,
+            // which breaks schedule parsing (split("-") returns 1 element).
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                        android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         }
 
         val strictInput = EditText(this).apply {
@@ -510,8 +547,6 @@ class SpecificBlockerActivity : AppCompatActivity() {
 
     private fun refreshList() {
         if (currentTab == 3) {
-            // Allowlist tab — show user-added allowed hosts
-            // Google is always implicitly allowed so we don't show it here
             val hosts = WebAllowlistManager.getAllowedHosts(this).sorted()
             val displayList = if (hosts.isEmpty())
                 listOf("(Google is always allowed — add more sites here)")
@@ -522,10 +557,34 @@ class SpecificBlockerActivity : AppCompatActivity() {
             return
         }
 
+        // Web tab: build display from all rules so schedules are visible
+        if (currentTab == 2) {
+            val rules = WebsiteBlockManager.getRules(this).sortedBy { it.host }
+            cachedWebRules = rules
+            val displayList = rules.map { rule ->
+                val base = if (rule.mode == WebBlockMode.SPECIFIC)
+                    "${rule.host}${rule.path} (specific)"
+                else
+                    rule.host
+                val schedule = WebsiteBlockManager.getScheduleForRule(this, rule)
+                val schedPart = if (schedule.isNotEmpty()) " [$schedule]" else ""
+                val strictKey = if (rule.mode == WebBlockMode.SPECIFIC)
+                    rule.host + rule.path else rule.host
+                val strictPart = when {
+                    ItemStrictModeManager.isLocked(this, strictKey) -> " 🔒"
+                    ItemStrictModeManager.isEnabled(this, strictKey) -> " 🔓"
+                    else -> ""
+                }
+                "$base$schedPart$strictPart"
+            }
+            adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, displayList)
+            listView.adapter = adapter
+            return
+        }
+
         val rawList: Collection<String> = when (currentTab) {
             0 -> SpecificScreenManager.getBlockedScreens(this)
             1 -> ContentBlockManager.getKeywords(this)
-            2 -> WebsiteBlockManager.getBlockedSites(this)
             else -> emptyList()
         }
 
