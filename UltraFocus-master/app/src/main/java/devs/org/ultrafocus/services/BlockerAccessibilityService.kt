@@ -263,9 +263,15 @@ class BlockerAccessibilityService : AccessibilityService() {
                         window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER
                     }
 
-                if (isRealSplitScreen) {
-                    val dangerousPkg = visibleWindows!!
-                        .mapNotNull { it.root?.packageName?.toString() }
+                val visiblePackages = visibleWindows
+                    ?.mapNotNull { it.root?.packageName?.toString() }
+                    ?.distinct()
+                    ?: emptyList()
+
+                val actuallyMultiApp = visiblePackages.size >= 2
+
+                if (isRealSplitScreen && actuallyMultiApp) {
+                    val dangerousPkg = visiblePackages
                         .firstOrNull { isDangerousPackage(it) }
                     if (dangerousPkg != null) {
                         // Step 1: back + home to collapse split screen
