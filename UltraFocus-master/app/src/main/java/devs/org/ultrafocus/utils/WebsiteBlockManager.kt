@@ -87,6 +87,13 @@ object WebsiteBlockManager {
         return getPrefs(context).getString(PREF_SCHEDULE_PREFIX + ruleKey(rule), "") ?: ""
     }
 
+    /**
+     * Returns the saved schedule for a rule directly by its key — no parseUrl round-trip.
+     * Used internally and by the UI to display a schedule indicator next to each entry.
+     */
+    fun getScheduleForRule(context: Context, rule: WebBlockRule): String =
+        getPrefs(context).getString(PREF_SCHEDULE_PREFIX + ruleKey(rule), "") ?: ""
+
     fun shouldBlockUrl(context: Context, urlDetected: String?): Boolean {
         if (urlDetected.isNullOrBlank()) return false
         val detected = parseUrl(urlDetected) ?: return false
@@ -131,18 +138,38 @@ object WebsiteBlockManager {
     }
 
     private fun scheduleAllowsBlock(context: Context, rule: WebBlockRule): Boolean {
-        val schedule = getSchedule(context, rule.host + rule.path, rule.mode)
-        if (schedule.isEmpty()) return true
+        // Read the schedule directly using the rule's own key — avoids going through
+        // buildRule/parseUrl which could produce a subtly different key (e.g. trailing
+        // slash) and silently return "" (always-block) instead of the real schedule.
+        val raw = getPrefs(context).getString(PREF_SCHEDULE_PREFIX + ruleKey(rule), "") ?: ""
+
+        // Normalise all dash variants to ASCII hyphen before parsing.
+        // Phone keyboards sometimes auto-replace "-" with an en-dash (–) or
+        // em-dash (—), causing split("-") to return a single element,
+        // parts.size == 2 to be false, and the range to be silently skipped.
+        // When every range is skipped the function returns false (don't block)
+        // even during the scheduled hours — making the schedule appear broken.
+        val schedule = raw
+            .replace('\u2013', '-')  // en-dash
+            .replace('\u2014', '-')  // em-dash
+            .replace('\u2212', '-')  // minus sign
+            .trim()
+
+        if (schedule.isEmpty()) return true   // no schedule → always block
+
         val now = Calendar.getInstance()
         val currentMinute = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
+
         for (range in schedule.split(",")) {
-            val parts = range.split("-")
+            val trimmedRange = range.trim()
+            // Accept both "HH:MM-HH:MM" and "HH:MM - HH:MM" (spaces around dash)
+            val parts = trimmedRange.split("-")
             if (parts.size == 2) {
                 try {
                     val start = parseTime(parts[0])
-                    val end = parseTime(parts[1])
+                    val end   = parseTime(parts[1])
                     if (currentMinute in start..end) return true
-                } catch (_: Exception) {}
+                } catch (_: Exception) { /* malformed range — skip */ }
             }
         }
         return false
