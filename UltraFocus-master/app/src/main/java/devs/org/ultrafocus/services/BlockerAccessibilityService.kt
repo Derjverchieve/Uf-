@@ -263,15 +263,9 @@ class BlockerAccessibilityService : AccessibilityService() {
                         window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER
                     }
 
-                val visiblePackages = visibleWindows
-                    ?.mapNotNull { it.root?.packageName?.toString() }
-                    ?.distinct()
-                    ?: emptyList()
-
-                val actuallyMultiApp = visiblePackages.size >= 2
-
-                if (isRealSplitScreen && actuallyMultiApp) {
-                    val dangerousPkg = visiblePackages
+                if (isRealSplitScreen) {
+                    val dangerousPkg = visibleWindows!!
+                        .mapNotNull { it.root?.packageName?.toString() }
                         .firstOrNull { isDangerousPackage(it) }
                     if (dangerousPkg != null) {
                         // Step 1: back + home to collapse split screen
@@ -534,12 +528,21 @@ class BlockerAccessibilityService : AccessibilityService() {
         if (!desc.isNullOrEmpty() &&
             ContentBlockManager.containsBlockedContent(this, desc)) return true
 
-        // Hostname check — only in page-view browser contexts
+        // Hostname check — only in page-view browser contexts.
+        //
+        // This path exists for reader/preview mode and cached/offline pages
+        // where the URL bar may not reflect the actual page content. The check
+        // must still respect schedules, otherwise a hostname that is currently
+        // outside its block window would incorrectly trigger a HOME redirect
+        // just because it appears in visible text.
         if (hostnameCheck && blockedHostsCache.isNotEmpty()) {
             val combined = listOfNotNull(text, desc).joinToString(" ").lowercase()
             if (combined.isNotBlank()) {
                 for (host in blockedHostsCache) {
-                    if (combined.contains(host)) return true
+                    if (combined.contains(host) &&
+                        WebsiteBlockManager.shouldBlockUrl(this, host)) {
+                        return true
+                    }
                 }
             }
         }
