@@ -138,47 +138,49 @@ object WebsiteBlockManager {
     }
 
     private fun scheduleAllowsBlock(context: Context, rule: WebBlockRule): Boolean {
-        val raw = getPrefs(context)
-            .getString(PREF_SCHEDULE_PREFIX + ruleKey(rule), "") ?: ""
+        // Read the schedule directly using the rule's own key — avoids going through
+        // buildRule/parseUrl which could produce a subtly different key (e.g. trailing
+        // slash) and silently return "" (always-block) instead of the real schedule.
+        val raw = getPrefs(context).getString(PREF_SCHEDULE_PREFIX + ruleKey(rule), "") ?: ""
 
+        // Normalise all dash variants to ASCII hyphen before parsing.
+        // Phone keyboards sometimes auto-replace "-" with an en-dash (–) or
+        // em-dash (—), causing split("-") to return a single element,
+        // parts.size == 2 to be false, and the range to be silently skipped.
+        // When every range is skipped the function returns false (don't block)
+        // even during the scheduled hours — making the schedule appear broken.
         val schedule = raw
-            .replace('–', '-') // en-dash
-            .replace('—', '-') // em-dash
-            .replace('−', '-') // minus sign
+            .replace('–', '-')  // en-dash
+            .replace('—', '-')  // em-dash
+            .replace('−', '-')  // minus sign
             .trim()
 
-        if (schedule.isEmpty()) return true
+        if (schedule.isEmpty()) return true   // no schedule → always block
 
         val now = Calendar.getInstance()
-        val currentMinute =
-            now.get(Calendar.HOUR_OF_DAY) * 60 +
-            now.get(Calendar.MINUTE)
+        val currentMinute = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
 
         for (range in schedule.split(",")) {
             val trimmedRange = range.trim()
-            if (trimmedRange.isEmpty()) continue
-
+            // Accept both "HH:MM-HH:MM" and "HH:MM - HH:MM" (spaces around dash)
             val parts = trimmedRange.split("-")
-            if (parts.size != 2) continue
+            if (parts.size == 2) {
+                try {
+                    val start = parseTime(parts[0])
+                    val end   = parseTime(parts[1])
 
-            try {
-                val start = parseTime(parts[0].trim())
-                val end = parseTime(parts[1].trim())
+                    val shouldBlock =
+                        if (start <= end) {
+                            currentMinute in start..end
+                        } else {
+                            // Overnight window, e.g. 22:00-06:00
+                            currentMinute >= start || currentMinute <= end
+                        }
 
-                val shouldBlock =
-                    if (start <= end) {
-                        currentMinute in start..end
-                    } else {
-                        currentMinute >= start ||
-                        currentMinute <= end
-                    }
-
-                if (shouldBlock) return true
-            } catch (_: Exception) {
-                continue
+                    if (shouldBlock) return true
+                } catch (_: Exception) { /* malformed range — skip */ }
             }
         }
-
         return false
     }
 
@@ -268,16 +270,12 @@ object WebsiteBlockManager {
     }
 
     private fun parseTime(t: String): Int {
-        val parts = t.trim().split(":")
-
-        require(parts.size == 2)
-
-        val hour = parts[0].trim().toInt()
-        val minute = parts[1].trim().toInt()
-
+        val split = t.trim().split(":")
+        require(split.size == 2)
+        val hour = split[0].trim().toInt()
+        val minute = split[1].trim().toInt()
         require(hour in 0..23)
         require(minute in 0..59)
-
         return hour * 60 + minute
     }
 }
