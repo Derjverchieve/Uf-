@@ -151,13 +151,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         return false
     }
 
-    private fun containsHostToken(text: String, host: String): Boolean {
-        if (text.isBlank() || host.isBlank()) return false
-        val escaped = Regex.escape(host.lowercase())
-        val pattern = Regex("(?i)(?<![\\p{L}\\p{N}_-])$escaped(?![\\p{L}\\p{N}_-])")
-        return pattern.containsMatchIn(text)
-    }
-
     // ── Lifecycle ────────────────────────────────────────────────────────────
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -258,22 +251,21 @@ class BlockerAccessibilityService : AccessibilityService() {
 
                 // ── Split screen dangerous-package guard ──────────────────────
                 // Check the live window list every scan tick. Only acts when
-                // Android is actually in split screen and at least two distinct
-                // app packages are visible. This avoids false positives from
-                // browser overlays / tab UIs / internal window layering.
+                // 2+ windows are visible (split screen / multi-window) so
+                // single-window Play Store use is completely unaffected.
                 val visibleWindows = windows
+                // True split screen is indicated by the presence of a
+                // TYPE_SPLIT_SCREEN_DIVIDER window. Checking windows.size >= 2
+                // alone is wrong — overlay dialogs (like the uninstall dialog)
+                // also produce 2+ windows without being split screen.
                 val isRealSplitScreen = !visibleWindows.isNullOrEmpty() &&
                     visibleWindows.any { window ->
                         window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER
                     }
 
-                val visiblePackages = visibleWindows
-                    ?.mapNotNull { it.root?.packageName?.toString() }
-                    ?.distinct()
-                    .orEmpty()
-
-                if (isRealSplitScreen && visiblePackages.size >= 2) {
-                    val dangerousPkg = visiblePackages
+                if (isRealSplitScreen) {
+                    val dangerousPkg = visibleWindows!!
+                        .mapNotNull { it.root?.packageName?.toString() }
                         .firstOrNull { isDangerousPackage(it) }
                     if (dangerousPkg != null) {
                         // Step 1: back + home to collapse split screen
@@ -302,17 +294,24 @@ class BlockerAccessibilityService : AccessibilityService() {
 
                     if (browserPackages.contains(packageName)) {
                         // ── Browser scan ──────────────────────────────────────
-                        // URL check first — handles normal browsing.
-                        if (scanForBlockedUrls(rootNode, packageName)) return
+                        // Capture the URL once so all browser checks use the same
+                        // current page state and schedule context.
+                        val currentUrl = captureBrowserUrl(rootNode, packageName)
 
-                        // Hostname content check — only when the address bar view
-                        // EXISTS in the tree (i.e. we are viewing an actual page).
-                        // Skipped for tab switcher / tab groups / history /
-                        // bookmarks / browser settings — those screens don't have
-                        // an address bar node and were causing false positives by
-                        // matching blocked domain names in tab titles and entries.
+                        // URL check first — handles normal browsing.
+                        if (scanForBlockedUrls(rootNode, packageName, currentUrl)) return
+
+                        // Hostname content check — only when the browser is on a
+                        // real page AND the current URL host is already a blocked
+                        // host. This avoids false positives on search results,
+                        // preview panels, tab groups, history entries, and other
+                        // browser UI that merely displays a blocked hostname as text.
                         val inPageView = isBrowserInPageView(rootNode, packageName)
-                        if (inPageView && scanForBlockedContent(rootNode, packageName, hostnameCheck = true)) {
+                        if (inPageView &&
+                            currentUrl != null &&
+                            shouldScanBrowserHostname(currentUrl) &&
+                            scanForBlockedContent(rootNode, packageName, currentUrl, hostnameCheck = true)
+                        ) {
                             performBlock(packageName)
                             return
                         }
@@ -350,9 +349,10 @@ class BlockerAccessibilityService : AccessibilityService() {
     // ── URL scanning ─────────────────────────────────────────────────────────
     private fun scanForBlockedUrls(
         rootNode: AccessibilityNodeInfo,
-        packageName: String
+        packageName: String,
+        currentUrl: String? = null
     ): Boolean {
-        val currentUrl = captureBrowserUrl(rootNode, packageName) ?: return false
+        val currentUrl = currentUrl ?: captureBrowserUrl(rootNode, packageName) ?: return false
 
         // Allowlist mode check — if enabled, block any URL not in the allowlist.
         // This runs before regular block rules so it acts as a global gate.
@@ -523,6 +523,7 @@ class BlockerAccessibilityService : AccessibilityService() {
     private fun scanForBlockedContent(
         node: AccessibilityNodeInfo,
         foregroundPackage: String = "",
+        currentBrowserUrl: String? = null,
         hostnameCheck: Boolean = false
     ): Boolean {
         if (!node.isVisibleToUser) return false
@@ -536,12 +537,20 @@ class BlockerAccessibilityService : AccessibilityService() {
         if (!desc.isNullOrEmpty() &&
             ContentBlockManager.containsBlockedContent(this, desc)) return true
 
-        // Hostname check — only in page-view browser contexts
-        if (hostnameCheck && blockedHostsCache.isNotEmpty()) {
+        // Hostname check — only when we're on a real browser page whose actual
+        // URL host is already a blocked host. This avoids false positives on
+        // search results / preview cards / history items that merely mention a
+        // blocked hostname in page text.
+        if (hostnameCheck &&
+            currentBrowserUrl != null &&
+            shouldScanBrowserHostname(currentBrowserUrl) &&
+            blockedHostsCache.isNotEmpty()
+        ) {
             val combined = listOfNotNull(text, desc).joinToString(" ").lowercase()
             if (combined.isNotBlank()) {
                 for (host in blockedHostsCache) {
-                    if (containsHostToken(combined, host)) return true
+                    val pattern = Regex("(?<![a-z0-9-])${Regex.escape(host.lowercase())}(?![a-z0-9-])")
+                    if (pattern.containsMatchIn(combined)) return true
                 }
             }
         }
@@ -550,11 +559,31 @@ class BlockerAccessibilityService : AccessibilityService() {
         for (i in 0 until childCount) {
             val child = node.getChild(i)
             if (child != null) {
-                if (scanForBlockedContent(child, foregroundPackage, hostnameCheck)) return true
+                if (scanForBlockedContent(child, foregroundPackage, currentBrowserUrl, hostnameCheck)) return true
                 child.recycle()
             }
         }
         return false
+    }
+
+
+    /**
+     * Browser hostname scanning is intentionally conservative:
+     * only scan visible page text when the current URL host already belongs
+     * to a blocked host/subdomain. This keeps Google search results, preview
+     * cards, tab switchers, history lists, and similar UI surfaces from
+     * blocking just because they mention a blocked hostname as plain text.
+     */
+    private fun shouldScanBrowserHostname(currentUrl: String): Boolean {
+        if (blockedHostsCache.isEmpty()) return false
+
+        val currentHost = WebsiteBlockManager.normalizeHost(currentUrl).lowercase()
+        if (currentHost.isBlank()) return false
+
+        return blockedHostsCache.any { blockedHost ->
+            val host = blockedHost.lowercase()
+            currentHost == host || currentHost.endsWith(".$host")
+        }
     }
 
     /**
