@@ -151,6 +151,13 @@ class BlockerAccessibilityService : AccessibilityService() {
         return false
     }
 
+    private fun containsHostToken(text: String, host: String): Boolean {
+        if (text.isBlank() || host.isBlank()) return false
+        val escaped = Regex.escape(host.lowercase())
+        val pattern = Regex("(?i)(?<![\\p{L}\\p{N}_-])$escaped(?![\\p{L}\\p{N}_-])")
+        return pattern.containsMatchIn(text)
+    }
+
     // ── Lifecycle ────────────────────────────────────────────────────────────
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -251,21 +258,22 @@ class BlockerAccessibilityService : AccessibilityService() {
 
                 // ── Split screen dangerous-package guard ──────────────────────
                 // Check the live window list every scan tick. Only acts when
-                // 2+ windows are visible (split screen / multi-window) so
-                // single-window Play Store use is completely unaffected.
+                // Android is actually in split screen and at least two distinct
+                // app packages are visible. This avoids false positives from
+                // browser overlays / tab UIs / internal window layering.
                 val visibleWindows = windows
-                // True split screen is indicated by the presence of a
-                // TYPE_SPLIT_SCREEN_DIVIDER window. Checking windows.size >= 2
-                // alone is wrong — overlay dialogs (like the uninstall dialog)
-                // also produce 2+ windows without being split screen.
                 val isRealSplitScreen = !visibleWindows.isNullOrEmpty() &&
                     visibleWindows.any { window ->
                         window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER
                     }
 
-                if (isRealSplitScreen) {
-                    val dangerousPkg = visibleWindows!!
-                        .mapNotNull { it.root?.packageName?.toString() }
+                val visiblePackages = visibleWindows
+                    ?.mapNotNull { it.root?.packageName?.toString() }
+                    ?.distinct()
+                    .orEmpty()
+
+                if (isRealSplitScreen && visiblePackages.size >= 2) {
+                    val dangerousPkg = visiblePackages
                         .firstOrNull { isDangerousPackage(it) }
                     if (dangerousPkg != null) {
                         // Step 1: back + home to collapse split screen
@@ -528,21 +536,12 @@ class BlockerAccessibilityService : AccessibilityService() {
         if (!desc.isNullOrEmpty() &&
             ContentBlockManager.containsBlockedContent(this, desc)) return true
 
-        // Hostname check — only in page-view browser contexts.
-        //
-        // This path exists for reader/preview mode and cached/offline pages
-        // where the URL bar may not reflect the actual page content. The check
-        // must still respect schedules, otherwise a hostname that is currently
-        // outside its block window would incorrectly trigger a HOME redirect
-        // just because it appears in visible text.
+        // Hostname check — only in page-view browser contexts
         if (hostnameCheck && blockedHostsCache.isNotEmpty()) {
             val combined = listOfNotNull(text, desc).joinToString(" ").lowercase()
             if (combined.isNotBlank()) {
                 for (host in blockedHostsCache) {
-                    if (combined.contains(host) &&
-                        WebsiteBlockManager.shouldBlockUrl(this, host)) {
-                        return true
-                    }
+                    if (containsHostToken(combined, host)) return true
                 }
             }
         }
