@@ -64,9 +64,22 @@ object BackupManager {
             json.put("blockedApps", appsArray)
 
             // ── Websites / keywords / screens ─────────────────────────────────
+            // Legacy compatibility: keep the old host-only list, but also export the
+            // full rule objects so schedules and SPECIFIC-page rules survive backup/restore.
             val websiteArray = JSONArray()
             WebsiteBlockManager.getBlockedSites(context).forEach { websiteArray.put(it) }
             json.put("websites", websiteArray)
+
+            val websiteRulesArray = JSONArray()
+            WebsiteBlockManager.getRules(context).forEach { rule ->
+                websiteRulesArray.put(JSONObject().apply {
+                    put("mode", rule.mode.name)
+                    put("host", rule.host)
+                    put("path", rule.path)
+                    put("schedule", WebsiteBlockManager.getScheduleForRule(context, rule))
+                })
+            }
+            json.put("websiteRules", websiteRulesArray)
 
             val keywordArray = JSONArray()
             ContentBlockManager.getKeywords(context).forEach { keywordArray.put(it) }
@@ -155,9 +168,38 @@ object BackupManager {
             }
 
             // ── Websites / keywords / screens ─────────────────────────────────
-            json.optJSONArray("websites")?.let { arr ->
+            // Prefer the full-fidelity format with mode + path + schedule.
+            // Fall back to the legacy string list (general hosts only) if needed.
+            json.optJSONArray("websiteRules")?.let { arr ->
                 for (i in 0 until arr.length()) {
-                    WebsiteBlockManager.addSite(context, arr.getString(i), null)
+                    val item = arr.optJSONObject(i)
+                    if (item != null) {
+                        val mode = runCatching {
+                            WebBlockMode.valueOf(item.optString("mode", WebBlockMode.GENERAL.name))
+                        }.getOrDefault(WebBlockMode.GENERAL)
+
+                        val host = item.optString("host").trim()
+                        if (host.isBlank()) continue
+
+                        val path = item.optString("path").trim()
+                        val schedule = item.optString("schedule").takeIf { it.isNotBlank() }
+
+                        val url = if (path.isBlank()) {
+                            host
+                        } else {
+                            if (path.startsWith("/")) "https://$host$path" else "https://$host/$path"
+                        }
+
+                        WebsiteBlockManager.addSite(context, url, schedule, mode)
+                    } else {
+                        val legacy = arr.optString(i).takeIf { it.isNotBlank() } ?: continue
+                        WebsiteBlockManager.addSite(context, legacy, null, WebBlockMode.GENERAL)
+                    }
+                }
+            } ?: json.optJSONArray("websites")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val legacy = arr.optString(i).takeIf { it.isNotBlank() } ?: continue
+                    WebsiteBlockManager.addSite(context, legacy, null, WebBlockMode.GENERAL)
                 }
             }
 
