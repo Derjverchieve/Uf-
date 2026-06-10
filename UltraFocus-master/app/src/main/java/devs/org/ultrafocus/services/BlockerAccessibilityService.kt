@@ -317,7 +317,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                         // notification shade) — a false keyword match there would
                         // block core device functionality.
                         if (!contentScanExemptPackages.contains(packageName) &&
-                            scanForBlockedContent(rootNode, packageName, hostnameCheck = false)) {
+                            scanForBlockedContent(rootNode, packageName)) {
                             performBlock(packageName)
                             return
                         }
