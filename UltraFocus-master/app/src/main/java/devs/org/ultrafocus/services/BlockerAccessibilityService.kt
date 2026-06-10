@@ -102,11 +102,12 @@ class BlockerAccessibilityService : AccessibilityService() {
     private var lastWebsiteBlockTime: Long = 0
     private val websiteBlockCooldownMs = 1500L
 
-    // Browser hostname scans are only allowed for a brief moment after a
-    // genuine browser click. This prevents passive OCR/search-result text from
+    // Browser preview scans are only allowed after a genuine click on a
+    // blocked-host mention. This prevents passive OCR/search-result text from
     // triggering a block while still catching an intentionally opened preview.
     private var lastBrowserClickTime: Long = 0L
-    private val browserClickArmWindowMs = 1500L
+    private var lastBrowserClickHost: String? = null
+    private val browserClickArmWindowMs = 30000L
 
     private val escapeKeywords = listOf("Cancel", "Deny", "No", "Close", "Quit", "Back")
 
@@ -199,8 +200,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         serviceScope.launch(Dispatchers.IO) {
             try {
                 val hosts = WebsiteBlockManager.getRules(this@BlockerAccessibilityService)
-                    .filter { it.mode == WebBlockMode.GENERAL }
-                    .map { it.host }
+                    .map { it.host.lowercase() }
                     .toSet()
                 blockedHostsCache = hosts
             } catch (_: Exception) {}
@@ -217,12 +217,22 @@ class BlockerAccessibilityService : AccessibilityService() {
         // 1. Self-immunity
         if (packageName == this.packageName) return
 
-        // Track user-initiated browser clicks. We only permit hostname text scans
-        // in browsers shortly after a click, which prevents Google results,
-        // tab switchers, OCR, and other passive surfaces from triggering blocks.
-        if (browserPackages.contains(packageName) &&
-            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
-            lastBrowserClickTime = System.currentTimeMillis()
+        // Track user-initiated clicks on blocked-host mentions. We arm browser
+        // preview scanning only when the user actually clicks a result/preview
+        // that mentions a blocked host, which prevents passive search-result OCR
+        // or tab titles from triggering blocks.
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            val clickSource = event.source
+            val clickRoot = rootInActiveWindow
+
+            val clickedHost =
+                findMentionedBlockedHostFromNode(clickSource) ?:
+                findMentionedBlockedHost(clickRoot)
+
+            if (clickedHost != null) {
+                lastBrowserClickTime = System.currentTimeMillis()
+                lastBrowserClickHost = clickedHost
+            }
         }
 
         // 1b. Split screen dangerous-package guard — checked inside the throttled
@@ -321,12 +331,32 @@ class BlockerAccessibilityService : AccessibilityService() {
                         val inPageView = isBrowserInPageView(rootNode, packageName)
                         val browserClickArmed =
                             System.currentTimeMillis() - lastBrowserClickTime <= browserClickArmWindowMs
+                        val clickedHost = lastBrowserClickHost
 
-                        if (inPageView &&
-                            browserClickArmed &&
-                            scanForBlockedContent(rootNode, packageName, hostnameCheck = true)) {
-                            performBlock(packageName)
-                            return
+                        if (inPageView && browserClickArmed) {
+                            // Prefer the live event source when it exists because
+                            // preview overlays and webview nodes often live there
+                            // rather than in the full root tree.
+                            val clickTree = event.source ?: rootNode
+                            val previewHit =
+                                (clickedHost != null &&
+                                    scanForBlockedContent(
+                                        clickTree,
+                                        packageName,
+                                        hostnameCheck = true,
+                                        targetHost = clickedHost
+                                    )) ||
+                                scanForBlockedContent(
+                                    clickTree,
+                                    packageName,
+                                    hostnameCheck = true,
+                                    targetHost = null
+                                )
+
+                            if (previewHit) {
+                                performBlock(packageName)
+                                return
+                            }
                         }
                     } else {
                         // ── Non-browser content / keyword scan ────────────────
@@ -461,6 +491,92 @@ class BlockerAccessibilityService : AccessibilityService() {
         return Regex("(?i)(?<![a-z0-9-])$escaped(?![a-z0-9-])").containsMatchIn(text)
     }
 
+    private fun findMentionedBlockedHost(node: AccessibilityNodeInfo?): String? {
+        if (node == null || blockedHostsCache.isEmpty()) return null
+
+        val text = listOfNotNull(
+            node.text?.toString(),
+            node.contentDescription?.toString()
+        ).joinToString(" ").lowercase()
+
+        if (text.isNotBlank()) {
+            blockedHostsCache.firstOrNull { host -> containsHostAsToken(text, host) }?.let { return it }
+        }
+
+        val childCount = node.childCount
+        for (i in 0 until childCount) {
+            val child = node.getChild(i)
+            if (child != null) {
+                try {
+                    val match = findMentionedBlockedHost(child)
+                    if (match != null) return match
+                } finally {
+                    child.recycle()
+                }
+            }
+        }
+        return null
+    }
+    /**
+     * Click-time host detection that is a little more generous than the general
+     * search scanner: it checks the clicked node, then walks up the parent chain
+     * a few levels and inspects each ancestor subtree. This helps catch browser
+     * preview cards where the visible host text lives in a sibling container
+     * rather than on the exact tapped leaf node.
+     */
+    private fun findMentionedBlockedHostFromNode(node: AccessibilityNodeInfo?): String? {
+        if (node == null || blockedHostsCache.isEmpty()) return null
+
+        val visited = HashSet<Int>()
+        var current: AccessibilityNodeInfo? = node
+        var depth = 0
+
+        while (current != null && depth < 6) {
+            val result = findMentionedBlockedHostWithVisited(current, visited)
+            if (result != null) return result
+
+            val parent = current.parent
+            if (parent == null) break
+            current = parent
+            depth++
+        }
+        return null
+    }
+
+    private fun findMentionedBlockedHostWithVisited(
+        node: AccessibilityNodeInfo?,
+        visited: MutableSet<Int>
+    ): String? {
+        if (node == null || blockedHostsCache.isEmpty()) return null
+
+        val key = System.identityHashCode(node)
+        if (!visited.add(key)) return null
+
+        val text = listOfNotNull(
+            node.text?.toString(),
+            node.contentDescription?.toString()
+        ).joinToString(" ").lowercase()
+
+        if (text.isNotBlank()) {
+            blockedHostsCache.firstOrNull { host -> containsHostAsToken(text, host) }?.let { return it }
+        }
+
+        val childCount = node.childCount
+        for (i in 0 until childCount) {
+            val child = node.getChild(i)
+            if (child != null) {
+                try {
+                    val match = findMentionedBlockedHostWithVisited(child, visited)
+                    if (match != null) return match
+                } finally {
+                    child.recycle()
+                }
+            }
+        }
+        return null
+    }
+
+
     private fun huntAndClickCancel(node: AccessibilityNodeInfo): Boolean {
         val text = node.text?.toString() ?: ""
         val desc = node.contentDescription?.toString() ?: ""
@@ -540,7 +656,8 @@ class BlockerAccessibilityService : AccessibilityService() {
     private fun scanForBlockedContent(
         node: AccessibilityNodeInfo,
         foregroundPackage: String = "",
-        hostnameCheck: Boolean = false
+        hostnameCheck: Boolean = false,
+        targetHost: String? = null
     ): Boolean {
         if (!node.isVisibleToUser) return false
 
@@ -553,11 +670,18 @@ class BlockerAccessibilityService : AccessibilityService() {
         if (!desc.isNullOrEmpty() &&
             ContentBlockManager.containsBlockedContent(this, desc)) return true
 
-        // Hostname check — only in click-armed browser contexts
+        // Hostname check — only in click-armed browser contexts, and only for
+        // the host that the user actually clicked/previewed. This avoids false
+        // positives from mere search-result mentions of unrelated blocked sites.
         if (hostnameCheck && blockedHostsCache.isNotEmpty()) {
             val combined = listOfNotNull(text, desc).joinToString(" ").lowercase()
             if (combined.isNotBlank()) {
-                for (host in blockedHostsCache) {
+                val hostsToCheck = if (targetHost.isNullOrBlank()) {
+                    blockedHostsCache
+                } else {
+                    setOf(targetHost.lowercase())
+                }
+                for (host in hostsToCheck) {
                     if (containsHostAsToken(combined, host)) return true
                 }
             }
@@ -567,7 +691,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         for (i in 0 until childCount) {
             val child = node.getChild(i)
             if (child != null) {
-                if (scanForBlockedContent(child, foregroundPackage, hostnameCheck)) return true
+                if (scanForBlockedContent(child, foregroundPackage, hostnameCheck, targetHost)) return true
                 child.recycle()
             }
         }
