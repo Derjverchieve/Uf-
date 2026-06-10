@@ -87,13 +87,8 @@ class BlockerAccessibilityService : AccessibilityService() {
     private var blockedAppInfos: List<devs.org.ultrafocus.model.AppInfo> = emptyList()
 
     // Cached set of blocked hostnames — kept in sync with WebsiteBlockManager.
-    // General hosts are used for legacy/shared checks.
+    // Used by scanForBlockedContent so reader/preview mode can't bypass URL detection.
     @Volatile private var blockedHostsCache: Set<String> = emptySet()
-
-    // All blocked web hosts (GENERAL + SPECIFIC) used only for click-based
-    // browser open detection so search-result snippets and OCR text do not
-    // trigger a block unless the user actually opens the page/preview.
-    @Volatile private var blockedWebHostsCache: Set<String> = emptySet()
 
     private var lastScanTime: Long = 0
     private val scanIntervalMs = 50L
@@ -106,6 +101,12 @@ class BlockerAccessibilityService : AccessibilityService() {
     private var lastBlockedWebsiteKey: String? = null
     private var lastWebsiteBlockTime: Long = 0
     private val websiteBlockCooldownMs = 1500L
+
+    // Browser hostname scans are only allowed for a brief moment after a
+    // genuine browser click. This prevents passive OCR/search-result text from
+    // triggering a block while still catching an intentionally opened preview.
+    private var lastBrowserClickTime: Long = 0L
+    private val browserClickArmWindowMs = 1500L
 
     private val escapeKeywords = listOf("Cancel", "Deny", "No", "Close", "Quit", "Back")
 
@@ -174,8 +175,8 @@ class BlockerAccessibilityService : AccessibilityService() {
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
                 AccessibilityEvent.TYPE_VIEW_SCROLLED or
-                AccessibilityEvent.TYPE_WINDOWS_CHANGED or
-                AccessibilityEvent.TYPE_VIEW_CLICKED
+                AccessibilityEvent.TYPE_VIEW_CLICKED or
+                AccessibilityEvent.TYPE_WINDOWS_CHANGED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = flags or
                 AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
@@ -197,12 +198,11 @@ class BlockerAccessibilityService : AccessibilityService() {
         // but we don't want to block the main thread on startup.
         serviceScope.launch(Dispatchers.IO) {
             try {
-                val rules = WebsiteBlockManager.getRules(this@BlockerAccessibilityService)
-                blockedHostsCache = rules
+                val hosts = WebsiteBlockManager.getRules(this@BlockerAccessibilityService)
                     .filter { it.mode == WebBlockMode.GENERAL }
                     .map { it.host }
                     .toSet()
-                blockedWebHostsCache = rules.map { it.host }.toSet()
+                blockedHostsCache = hosts
             } catch (_: Exception) {}
         }
     }
@@ -216,6 +216,14 @@ class BlockerAccessibilityService : AccessibilityService() {
 
         // 1. Self-immunity
         if (packageName == this.packageName) return
+
+        // Track user-initiated browser clicks. We only permit hostname text scans
+        // in browsers shortly after a click, which prevents Google results,
+        // tab switchers, OCR, and other passive surfaces from triggering blocks.
+        if (browserPackages.contains(packageName) &&
+            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            lastBrowserClickTime = System.currentTimeMillis()
+        }
 
         // 1b. Split screen dangerous-package guard — checked inside the throttled
         // scan loop below so it runs every 50ms rather than relying on
@@ -301,23 +309,32 @@ class BlockerAccessibilityService : AccessibilityService() {
 
                     if (browserPackages.contains(packageName)) {
                         // ── Browser scan ──────────────────────────────────────
-                        // Browser content is not scanned for hostnames. We only:
-                        //   1) block when the address bar has navigated to a
-                        //      blocked URL, or
-                        //   2) block when the user actually clicks/open a blocked
-                        //      host from browser UI (preview/result/open action).
-                        //
-                        // This prevents Google result snippets / OCR / plain text
-                        // mentions from triggering while still blocking real opens.
-                        if (handleBrowserBlockedHostClick(event, rootNode, packageName)) return
+                        // URL check first — handles normal browsing.
                         if (scanForBlockedUrls(rootNode, packageName)) return
+
+                        // Hostname content check is intentionally gated behind a
+                        // very short post-click window. This prevents passive
+                        // OCR/search-result/tab-title matches from firing a block,
+                        // while still allowing an intentionally opened preview or
+                        // clicked result to be caught even if the browser does not
+                        // visibly update the address bar.
+                        val inPageView = isBrowserInPageView(rootNode, packageName)
+                        val browserClickArmed =
+                            System.currentTimeMillis() - lastBrowserClickTime <= browserClickArmWindowMs
+
+                        if (inPageView &&
+                            browserClickArmed &&
+                            scanForBlockedContent(rootNode, packageName, hostnameCheck = true)) {
+                            performBlock(packageName)
+                            return
+                        }
                     } else {
                         // ── Non-browser content / keyword scan ────────────────
                         // Exempt system packages (launcher, keyboard, systemui,
                         // notification shade) — a false keyword match there would
                         // block core device functionality.
                         if (!contentScanExemptPackages.contains(packageName) &&
-                            scanForBlockedContent(rootNode, packageName)) {
+                            scanForBlockedContent(rootNode, packageName, hostnameCheck = false)) {
                             performBlock(packageName)
                             return
                         }
@@ -340,116 +357,6 @@ class BlockerAccessibilityService : AccessibilityService() {
                 performBlock(packageName)
             }
         }
-    }
-
-    private fun handleBrowserBlockedHostClick(
-        event: AccessibilityEvent,
-        rootNode: AccessibilityNodeInfo,
-        packageName: String
-    ): Boolean {
-        if (event.eventType != AccessibilityEvent.TYPE_VIEW_CLICKED) return false
-        if (!isBrowserInPageView(rootNode, packageName)) return false
-
-        val eventText = buildString {
-            event.text?.forEach { item ->
-                val value = item?.toString()?.trim().orEmpty()
-                if (value.isNotBlank()) {
-                    append(value)
-                    append(' ')
-                }
-            }
-            event.contentDescription?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let {
-                append(it)
-            }
-        }.trim()
-
-        val source = event.source
-        try {
-            val mentionedHost =
-                findMentionedBlockedHost(eventText) ?: run {
-                    if (source != null) {
-                        findMentionedBlockedHostFromNode(source)
-                    } else {
-                        null
-                    }
-                } ?: return false
-
-            // Respect temporary access first.
-            if (TemporaryAccessManager.isAllowed(mentionedHost)) return false
-
-            // Preview/open clicks must still obey allowlist mode and schedules.
-            if (WebAllowlistManager.isBlockedByAllowlist(this, mentionedHost)) {
-                tryRedirectBrowserTab(rootNode, packageName)
-                performGlobalAction(GLOBAL_ACTION_HOME)
-                performRedirectToGoogle()
-                return true
-            }
-
-            if (!WebsiteBlockManager.shouldBlockUrl(this, mentionedHost)) return false
-
-            tryRedirectBrowserTab(rootNode, packageName)
-            performGlobalAction(GLOBAL_ACTION_HOME)
-            performRedirectToGoogle()
-            return true
-        } finally {
-            source?.recycle()
-        }
-    }
-
-    private fun findMentionedBlockedHost(text: String): String? {
-        if (text.isBlank()) return null
-        val lowered = text.lowercase()
-
-        val hosts = blockedWebHostsCache
-            .asSequence()
-            .sortedByDescending { it.length }
-            .toList()
-
-        for (host in hosts) {
-            if (containsHostToken(lowered, host.lowercase())) {
-                return host
-            }
-        }
-        return null
-    }
-
-    private fun findMentionedBlockedHostFromNode(node: AccessibilityNodeInfo): String? {
-        if (!node.isVisibleToUser) return null
-
-        val text = node.text?.toString().orEmpty()
-        val desc = node.contentDescription?.toString().orEmpty()
-
-        findMentionedBlockedHost(text)?.let { return it }
-        findMentionedBlockedHost(desc)?.let { return it }
-
-        val childCount = node.childCount
-        for (i in 0 until childCount) {
-            val child = node.getChild(i)
-            if (child != null) {
-                try {
-                    findMentionedBlockedHostFromNode(child)?.let { return it }
-                } finally {
-                    child.recycle()
-                }
-            }
-        }
-        return null
-    }
-
-    private fun containsHostToken(text: String, host: String): Boolean {
-        var start = text.indexOf(host)
-        while (start >= 0) {
-            val before = if (start > 0) text[start - 1] else null
-            val afterIndex = start + host.length
-            val after = if (afterIndex < text.length) text[afterIndex] else null
-
-            val beforeOk = before == null || !before.isLetterOrDigit()
-            val afterOk = after == null || !after.isLetterOrDigit()
-
-            if (beforeOk && afterOk) return true
-            start = text.indexOf(host, start + host.length)
-        }
-        return false
     }
 
     // ── URL scanning ─────────────────────────────────────────────────────────
@@ -549,6 +456,11 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+    private fun containsHostAsToken(text: String, host: String): Boolean {
+        val escaped = Regex.escape(host.lowercase())
+        return Regex("(?i)(?<![a-z0-9-])$escaped(?![a-z0-9-])").containsMatchIn(text)
+    }
+
     private fun huntAndClickCancel(node: AccessibilityNodeInfo): Boolean {
         val text = node.text?.toString() ?: ""
         val desc = node.contentDescription?.toString() ?: ""
@@ -612,17 +524,23 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Recursively scans visible text nodes for blocked keywords.
+     * Recursively scans visible text nodes for blocked keywords and, optionally,
+     * blocked hostnames.
      *
-     * Browser website blocking is URL-based only. Hostnames are not scanned
-     * from browser text here; browser clicks are handled separately so search
-     * results, preview cards, tab titles, OCR overlays, and other browser
-     * surfaces can mention blocked domains without triggering a block unless
-     * the user actually opens the page or preview.
+     * hostnameCheck is only true when called for a browser that is confirmed to
+     * be showing an actual web page (address bar exists). This prevents tab
+     * groups, history, search results, and other browser UI from triggering
+     * false positives, while still catching reader mode / preview mode where
+     * a blocked domain's content is rendered without the URL bar updating.
+     *
+     * For non-browser packages, hostnameCheck is always false — keyword blocking
+     * is intentional for any app, but hostname matching outside a browser context
+     * would produce constant false positives.
      */
     private fun scanForBlockedContent(
         node: AccessibilityNodeInfo,
-        foregroundPackage: String = ""
+        foregroundPackage: String = "",
+        hostnameCheck: Boolean = false
     ): Boolean {
         if (!node.isVisibleToUser) return false
 
@@ -635,11 +553,21 @@ class BlockerAccessibilityService : AccessibilityService() {
         if (!desc.isNullOrEmpty() &&
             ContentBlockManager.containsBlockedContent(this, desc)) return true
 
+        // Hostname check — only in click-armed browser contexts
+        if (hostnameCheck && blockedHostsCache.isNotEmpty()) {
+            val combined = listOfNotNull(text, desc).joinToString(" ").lowercase()
+            if (combined.isNotBlank()) {
+                for (host in blockedHostsCache) {
+                    if (containsHostAsToken(combined, host)) return true
+                }
+            }
+        }
+
         val childCount = node.childCount
         for (i in 0 until childCount) {
             val child = node.getChild(i)
             if (child != null) {
-                if (scanForBlockedContent(child, foregroundPackage)) return true
+                if (scanForBlockedContent(child, foregroundPackage, hostnameCheck)) return true
                 child.recycle()
             }
         }
