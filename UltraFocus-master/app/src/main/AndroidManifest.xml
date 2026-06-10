@@ -34,6 +34,10 @@
 
         <activity android:name=".activities.SelectAppActivity" android:exported="false" />
 
+        <activity
+            android:name=".activities.DebugCaptureActivity"
+            android:exported="false" />
+
         <!-- resizeableActivity=false forces Android to exit split screen when
              BlockedAppActivity launches, since non-resizeable activities cannot
              participate in split screen mode. -->
