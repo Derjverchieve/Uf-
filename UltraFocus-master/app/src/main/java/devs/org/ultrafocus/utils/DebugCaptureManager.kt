@@ -226,16 +226,16 @@ object DebugCaptureManager {
 
         return DebugCaptureEntry(
             timestamp = obj.optLong("timestamp", 0L),
-            packageName = obj.optString("packageName", null),
+            packageName = obj.optString("packageName").takeIf { it.isNotBlank() },
             eventType = obj.optInt("eventType", 0),
-            className = obj.optString("className", null),
+            className = obj.optString("className").takeIf { it.isNotBlank() },
             windowCount = obj.optInt("windowCount", 0),
             rootClasses = roots,
-            addressBar = obj.optString("addressBar", null),
+            addressBar = obj.optString("addressBar").takeIf { it.isNotBlank() },
             browserInPageView = if (obj.has("browserInPageView") && !obj.isNull("browserInPageView")) obj.optBoolean("browserInPageView", false) else null,
             clickArmed = if (obj.has("clickArmed") && !obj.isNull("clickArmed")) obj.optBoolean("clickArmed", false) else null,
-            note = obj.optString("note", null),
-            treeDump = obj.optString("treeDump", null)
+            note = obj.optString("note").takeIf { it.isNotBlank() },
+            treeDump = obj.optString("treeDump").takeIf { it.isNotBlank() }
         )
     }
 
