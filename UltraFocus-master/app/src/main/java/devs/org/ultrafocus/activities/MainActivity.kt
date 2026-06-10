@@ -56,6 +56,8 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        binding.toolbar.inflateMenu(R.menu.main_toolbar)
+
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
@@ -144,10 +146,17 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.toolbar.setOnMenuItemClickListener { menuItem ->
-            if (menuItem.itemId == R.id.done) {
-                showSettingsDialog()
-                true
-            } else false
+            when (menuItem.itemId) {
+                R.id.done -> {
+                    showSettingsDialog()
+                    true
+                }
+                R.id.debug_capture -> {
+                    startActivity(Intent(this, DebugCaptureActivity::class.java))
+                    true
+                }
+                else -> false
+            }
         }
     }
 
