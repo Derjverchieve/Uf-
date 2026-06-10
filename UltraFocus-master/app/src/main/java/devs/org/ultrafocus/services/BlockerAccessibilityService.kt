@@ -17,6 +17,7 @@ import devs.org.ultrafocus.utils.ContentBlockManager
 import devs.org.ultrafocus.utils.SoftBlockManager
 import devs.org.ultrafocus.utils.SpecificScreenManager
 import devs.org.ultrafocus.utils.TemporaryAccessManager
+import devs.org.ultrafocus.utils.DebugCaptureManager
 import devs.org.ultrafocus.utils.WebAllowlistManager
 import devs.org.ultrafocus.utils.WebBlockMode
 import devs.org.ultrafocus.utils.WebsiteBlockManager
@@ -217,12 +218,12 @@ class BlockerAccessibilityService : AccessibilityService() {
         // 1. Self-immunity
         if (packageName == this.packageName) return
 
-        val debugRootNode = rootInActiveWindow ?: event.source
+        val rootNode = rootInActiveWindow ?: event.source
         recordDebugSnapshot(
             packageName = packageName,
             eventType = event.eventType,
             className = className,
-            rootNode = debugRootNode,
+            rootNode = rootNode,
             note = "event=${event.eventType}"
         )
 
@@ -328,7 +329,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                     }
                 }
                 // ─────────────────────────────────────────────────────────────
-                val rootNode = rootInActiveWindow ?: event.source
+                // rootNode already captured above so debug logging can reference it here.
                 if (rootNode != null) {
                     val rootPkg = rootNode.packageName?.toString().orEmpty()
                     if (rootPkg == this.packageName) return
