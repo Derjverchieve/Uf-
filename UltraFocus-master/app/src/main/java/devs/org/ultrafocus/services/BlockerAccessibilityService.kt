@@ -2,6 +2,8 @@ package devs.org.ultrafocus.services
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -115,7 +117,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
                 AccessibilityEvent.TYPE_VIEW_SCROLLED or
-                AccessibilityEvent.TYPE_VIEW_CLICKED or       // needed for preview tap detection
+                AccessibilityEvent.TYPE_VIEW_CLICKED or
                 AccessibilityEvent.TYPE_WINDOWS_CHANGED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = flags or
@@ -157,13 +159,11 @@ class BlockerAccessibilityService : AccessibilityService() {
             event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
 
             val root = rootInActiveWindow
-            // Immediate check: "Preview page" text anywhere on screen
             if (root != null && findPreviewTriggerFromNode(root)) {
                 closePreviewAndExit(packageName)
                 return
             }
 
-            // Delayed scan (in case preview loads a fraction later)
             previewClickJob?.cancel()
             previewClickJob = serviceScope.launch {
                 delay(200)
@@ -178,7 +178,7 @@ class BlockerAccessibilityService : AccessibilityService() {
             return
         }
 
-        // ── Regular content & URL scanning ────────────────────────────────
+        // ── Main scanning loop ────────────────────────────────────────────
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
@@ -188,15 +188,38 @@ class BlockerAccessibilityService : AccessibilityService() {
             if (currentTime - lastScanTime > scanIntervalMs) {
                 lastScanTime = currentTime
 
+                // ── Split‑screen guard: block any blocked app ──────────────
+                val visibleWindows = windows
+                val isRealSplitScreen = !visibleWindows.isNullOrEmpty() &&
+                    visibleWindows.any { window ->
+                        window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER
+                    }
+
+                if (isRealSplitScreen) {
+                    val blockedPkg = visibleWindows!!
+                        .mapNotNull { it.root?.packageName?.toString() }
+                        .firstOrNull { pkg ->
+                            pkg != this.packageName &&
+                            blockedAppInfos.any { it.packageName == pkg && shouldBlockNow(it) }
+                        }
+                    if (blockedPkg != null) {
+                        // Kill the blocked app's process so it can't linger in recents
+                        try {
+                            val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                            am.killBackgroundProcesses(blockedPkg)
+                        } catch (_: Exception) {}
+                        performBlock(blockedPkg)
+                        return
+                    }
+                }
+
                 val rootNode = rootInActiveWindow ?: event.source ?: return
                 val rootPkg = rootNode.packageName?.toString().orEmpty()
                 if (rootPkg == this.packageName) return
 
                 if (browserPackages.contains(packageName)) {
-                    // 1. URL‑based blocking
                     if (scanForBlockedUrls(rootNode, packageName)) return
 
-                    // 2. Content (hostname) blocking in page view or preview
                     val inPageView = isBrowserInPageView(rootNode, packageName)
                     val inPreview = isChromePreview(rootNode, packageName)
 
@@ -210,7 +233,6 @@ class BlockerAccessibilityService : AccessibilityService() {
                         return
                     }
                 } else {
-                    // Non‑browser: keyword blocking only (if not exempt)
                     if (!contentScanExemptPackages.contains(packageName) &&
                         scanForBlockedContent(rootNode, packageName, hostnameCheck = false)) {
                         performBlock(packageName)
@@ -220,7 +242,7 @@ class BlockerAccessibilityService : AccessibilityService() {
             }
         }
 
-        // ── Activity / specific screen blocker ────────────────────────────
+        // Activity & specific screen blocker
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             if (packageName == this.packageName) return
 
@@ -249,7 +271,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         lastBlockedPackage = packageName
         lastBlockTime = now
 
-        // 1. Try to click the close button directly
         val root = rootInActiveWindow
         if (root != null && findAndClickPreviewClose(root)) {
             serviceScope.launch {
@@ -259,14 +280,13 @@ class BlockerAccessibilityService : AccessibilityService() {
             return
         }
 
-        // 2. Fallback: back events with generous delays
         performGlobalAction(GLOBAL_ACTION_BACK)
         serviceScope.launch {
             delay(350)
             performGlobalAction(GLOBAL_ACTION_BACK)
             delay(350)
             if (rootInActiveWindow?.packageName?.toString() == packageName) {
-                performGlobalAction(GLOBAL_ACTION_BACK)   // third back if still in preview
+                performGlobalAction(GLOBAL_ACTION_BACK)
                 delay(200)
             }
             performGlobalAction(GLOBAL_ACTION_HOME)
