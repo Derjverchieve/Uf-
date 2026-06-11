@@ -90,13 +90,6 @@ class BlockerAccessibilityService : AccessibilityService() {
     // Used by scanForBlockedContent so reader/preview mode can't bypass URL detection.
     @Volatile private var blockedHostsCache: Set<String> = emptySet()
 
-    // Browser preview / opened-content arming.
-    // A click on Chrome's preview surface is a stronger signal than passive
-    // hostname text, so we temporarily arm preview blocking after that click.
-    private var previewClickArmedUntil: Long = 0L
-    private var previewClickArmedPackage: String? = null
-    private val previewClickArmMs = 2500L
-
     private var lastScanTime: Long = 0
     private val scanIntervalMs = 50L
 
@@ -108,6 +101,13 @@ class BlockerAccessibilityService : AccessibilityService() {
     private var lastBlockedWebsiteKey: String? = null
     private var lastWebsiteBlockTime: Long = 0
     private val websiteBlockCooldownMs = 1500L
+
+    // Preview-page detection is click-armed: only after a user actually taps a
+    // browser preview surface do we inspect the next browser page/content state.
+    private var browserPreviewArmedPackage: String? = null
+    private var browserPreviewArmedUntil: Long = 0L
+    private var browserPreviewQuery: String = ""
+    private val browserPreviewArmWindowMs = 5000L
 
     private val escapeKeywords = listOf("Cancel", "Deny", "No", "Close", "Quit", "Back")
 
@@ -153,6 +153,111 @@ class BlockerAccessibilityService : AccessibilityService() {
             if (!nodes.isNullOrEmpty()) {
                 nodes.forEach { runCatching { it.recycle() } }
                 return true
+            }
+        }
+        return false
+    }
+
+    private fun isBrowserPreviewArmed(packageName: String): Boolean {
+        val now = System.currentTimeMillis()
+        if (browserPreviewArmedPackage != packageName) return false
+        if (now > browserPreviewArmedUntil) {
+            browserPreviewArmedPackage = null
+            browserPreviewArmedUntil = 0L
+            browserPreviewQuery = ""
+            return false
+        }
+        return true
+    }
+
+    private fun shouldBlockBrowserPreview(
+        rootNode: AccessibilityNodeInfo,
+        packageName: String
+    ): Boolean {
+        val pageText = collectVisibleText(rootNode).lowercase()
+        val currentUrl = captureBrowserUrl(rootNode, packageName).orEmpty()
+        val searchQuery = extractSearchQuery(currentUrl).lowercase()
+        val armingQuery = browserPreviewQuery.lowercase()
+
+        // Only block if the armed preview looks like it is opening a blocked
+        // destination. This deliberately ignores passive mentions on Google
+        // results pages and only reacts to the intentional preview-open path.
+        for (host in blockedHostsCache) {
+            val hostRoot = host.substringBefore('.').lowercase()
+            if (hostRoot.length < 3) continue
+            if (textMatchesHost(pageText, hostRoot)) return true
+            if (textMatchesHost(searchQuery, hostRoot)) return true
+            if (textMatchesHost(armingQuery, hostRoot)) return true
+        }
+        return false
+    }
+
+    private fun extractSearchQuery(rawUrl: String): String {
+        val clean = rawUrl.trim()
+        if (clean.isBlank()) return ""
+        val normalized = if (clean.startsWith("http://") || clean.startsWith("https://")) {
+            clean
+        } else {
+            "https://$clean"
+        }
+        return try {
+            val uri = Uri.parse(normalized)
+            val keys = listOf("q", "query", "search_query", "text")
+            for (key in keys) {
+                val value = uri.getQueryParameter(key)
+                if (!value.isNullOrBlank()) return value
+            }
+            ""
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    private fun textMatchesHost(text: String, hostRoot: String): Boolean {
+        if (text.isBlank() || hostRoot.isBlank()) return false
+        val normalizedText = text.lowercase().replace(Regex("[^a-z0-9]+"), " ")
+        val normalizedHost = hostRoot.lowercase().replace(Regex("[^a-z0-9]+"), "")
+        if (normalizedHost.length < 3) return false
+        return normalizedText.contains(normalizedHost)
+    }
+
+    private fun collectVisibleText(node: AccessibilityNodeInfo): String {
+        val builder = StringBuilder()
+
+        fun walk(current: AccessibilityNodeInfo) {
+            if (!current.isVisibleToUser) return
+            current.text?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let {
+                builder.append(it).append(' ')
+            }
+            current.contentDescription?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let {
+                builder.append(it).append(' ')
+            }
+            for (i in 0 until current.childCount) {
+                val child = current.getChild(i) ?: continue
+                try {
+                    walk(child)
+                } finally {
+                    child.recycle()
+                }
+            }
+        }
+
+        walk(node)
+        return builder.toString().trim()
+    }
+
+    private fun nodeContainsText(node: AccessibilityNodeInfo, needle: String): Boolean {
+        if (needle.isBlank()) return false
+        val text = node.text?.toString().orEmpty()
+        val desc = node.contentDescription?.toString().orEmpty()
+        if (text.contains(needle, ignoreCase = true) ||
+            desc.contains(needle, ignoreCase = true)) return true
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            try {
+                if (nodeContainsText(child, needle)) return true
+            } finally {
+                child.recycle()
             }
         }
         return false
@@ -221,6 +326,26 @@ class BlockerAccessibilityService : AccessibilityService() {
         // scan loop below so it runs every 50ms rather than relying on
         // TYPE_WINDOWS_CHANGED alone (unreliable on some OEMs).
 
+        // Browser preview arming:
+        // Chrome exposes "Preview page" as a click target even when the URL
+        // bar stays on Google. That click is the only reliable signal that the
+        // user intentionally opened a preview, so we arm a short-lived window
+        // here and only inspect browser page content during that window.
+        if (browserPackages.contains(packageName) &&
+            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            val clickNode = event.source ?: rootInActiveWindow
+            val clickRoot = rootInActiveWindow ?: event.source
+            if (clickNode != null && nodeContainsText(clickNode, "Preview page")) {
+                browserPreviewArmedPackage = packageName
+                browserPreviewArmedUntil = System.currentTimeMillis() + browserPreviewArmWindowMs
+                browserPreviewQuery = if (clickRoot != null) {
+                    captureBrowserUrl(clickRoot, packageName).orEmpty()
+                } else {
+                    ""
+                }
+            }
+        }
+
         // 2. Ultra Power / system settings trap
         if (packageName == "com.android.systemui" || packageName.contains("settings")) {
             val rootNode = rootInActiveWindow ?: event.source
@@ -244,18 +369,6 @@ class BlockerAccessibilityService : AccessibilityService() {
             performGlobalAction(GLOBAL_ACTION_HOME)
             performBlock(packageName)
             return
-        }
-
-        // 3b. Browser preview arming — Chrome's "Preview page" click is the
-        // one reliable signal we have that the user intentionally opened a
-        // preview surface rather than merely seeing search-result text.
-        if (browserPackages.contains(packageName) &&
-            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
-            val clickRoot = rootInActiveWindow ?: event.source
-            if (clickRoot != null && isPreviewPageClick(clickRoot)) {
-                previewClickArmedUntil = System.currentTimeMillis() + previewClickArmMs
-                previewClickArmedPackage = packageName
-            }
         }
 
         // 4. Web & content scanner
@@ -316,36 +429,21 @@ class BlockerAccessibilityService : AccessibilityService() {
                         // URL check first — handles normal browsing.
                         if (scanForBlockedUrls(rootNode, packageName)) return
 
-                        // Preview-open check: Chrome's preview surface often keeps
-                        // the Google search URL in place, so the only reliable
-                        // signal is the explicit "Preview page" click followed by
-                        // a page-view state. We arm briefly on that click, then
-                        // match the current browser/search text against blocked
-                        // host hints before blocking the browser session.
                         val inPageView = isBrowserInPageView(rootNode, packageName)
-                        val previewArmed =
-                            previewClickArmedPackage == packageName &&
-                            System.currentTimeMillis() <= previewClickArmedUntil
+                        val previewArmed = isBrowserPreviewArmed(packageName)
 
-                        if (inPageView && previewArmed) {
-                            val currentUrl = captureBrowserUrl(rootNode, packageName).orEmpty()
-                            if (previewMentionsBlockedHost(currentUrl)) {
-                                previewClickArmedPackage = null
-                                previewClickArmedUntil = 0L
-                                tryRedirectBrowserTab(rootNode, packageName)
-                                performGlobalAction(GLOBAL_ACTION_HOME)
-                                performRedirectToGoogle()
-                                return
-                            }
-                        }
-
-                        // Hostname content check — only when the address bar view
-                        // EXISTS in the tree (i.e. we are viewing an actual page).
-                        // Skipped for tab switcher / tab groups / history /
-                        // bookmarks / browser settings — those screens don't have
-                        // an address bar node and were causing false positives by
-                        // matching blocked domain names in tab titles and entries.
-                        if (inPageView && scanForBlockedContent(rootNode, packageName, hostnameCheck = true)) {
+                        // Preview/opened-content blocking:
+                        // If the user tapped Chrome's "Preview page" surface,
+                        // block only when that click is still within its short
+                        // arm window and the browser has entered a page-like
+                        // state. This avoids passive Google result text from
+                        // triggering a block while still catching the opened
+                        // preview itself.
+                        if (inPageView && previewArmed &&
+                            shouldBlockBrowserPreview(rootNode, packageName)) {
+                            browserPreviewArmedPackage = null
+                            browserPreviewArmedUntil = 0L
+                            browserPreviewQuery = ""
                             performBlock(packageName)
                             return
                         }
@@ -537,56 +635,6 @@ class BlockerAccessibilityService : AccessibilityService() {
             }
             startActivity(intent)
         } catch (_: Exception) {}
-    }
-
-    private fun isPreviewPageClick(node: AccessibilityNodeInfo): Boolean {
-        return nodeTreeContainsText(node, "Preview page")
-    }
-
-    private fun nodeTreeContainsText(node: AccessibilityNodeInfo, needle: String): Boolean {
-        val text = node.text?.toString().orEmpty()
-        val desc = node.contentDescription?.toString().orEmpty()
-        if (text.contains(needle, ignoreCase = true) ||
-            desc.contains(needle, ignoreCase = true)) {
-            return true
-        }
-
-        val childCount = node.childCount
-        for (i in 0 until childCount) {
-            val child = node.getChild(i)
-            if (child != null) {
-                try {
-                    if (nodeTreeContainsText(child, needle)) return true
-                } finally {
-                    child.recycle()
-                }
-            }
-        }
-        return false
-    }
-
-    private fun previewMentionsBlockedHost(text: String): Boolean {
-        if (text.isBlank() || blockedHostsCache.isEmpty()) return false
-
-        val haystack = text.lowercase()
-            .replace(Regex("[^a-z0-9]+"), " ")
-            .trim()
-
-        if (haystack.isBlank()) return false
-
-        for (host in blockedHostsCache) {
-            val normalizedHost = host.lowercase().trim()
-            if (normalizedHost.isBlank()) continue
-
-            val hostStem = normalizedHost.substringBefore('.').trim()
-            val normalizedHostToken = normalizedHost.replace('.', ' ')
-            if (haystack.contains(normalizedHostToken) ||
-                haystack.contains(normalizedHost) ||
-                (hostStem.isNotBlank() && haystack.contains(hostStem))) {
-                return true
-            }
-        }
-        return false
     }
 
     /**
