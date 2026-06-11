@@ -26,31 +26,21 @@ import java.util.Calendar
 
 class BlockerAccessibilityService : AccessibilityService() {
 
-    // ── Browser config ──────────────────────────────────────────────────────
     private data class BrowserConfig(
         val packageName: String,
         val addressBarIds: List<String>
     )
 
     private val browserConfigs = listOf(
-        BrowserConfig("com.android.chrome",
-            listOf("com.android.chrome:id/url_bar")),
-        BrowserConfig("org.mozilla.firefox",
-            listOf("org.mozilla.firefox:id/mozac_browser_toolbar_url_view")),
-        BrowserConfig("com.microsoft.emmx",
-            listOf("com.microsoft.emmx:id/url_bar")),
-        BrowserConfig("com.sec.android.app.sbrowser",
-            listOf("com.sec.android.app.sbrowser:id/location_bar_edit_text")),
-        BrowserConfig("com.opera.browser",
-            listOf("com.opera.browser:id/url_field")),
-        BrowserConfig("com.opera.mini.native",
-            listOf("com.opera.mini.native:id/url_field")),
-        BrowserConfig("com.brave.browser",
-            listOf("com.brave.browser:id/url_bar")),
-        BrowserConfig("com.duckduckgo.mobile.android",
-            listOf("com.duckduckgo.mobile.android:id/url_bar")),
-        BrowserConfig("com.transsion.phoenix",
-            listOf("com.transsion.phoenix:id/url_bar"))
+        BrowserConfig("com.android.chrome", listOf("com.android.chrome:id/url_bar")),
+        BrowserConfig("org.mozilla.firefox", listOf("org.mozilla.firefox:id/mozac_browser_toolbar_url_view")),
+        BrowserConfig("com.microsoft.emmx", listOf("com.microsoft.emmx:id/url_bar")),
+        BrowserConfig("com.sec.android.app.sbrowser", listOf("com.sec.android.app.sbrowser:id/location_bar_edit_text")),
+        BrowserConfig("com.opera.browser", listOf("com.opera.browser:id/url_field")),
+        BrowserConfig("com.opera.mini.native", listOf("com.opera.mini.native:id/url_field")),
+        BrowserConfig("com.brave.browser", listOf("com.brave.browser:id/url_bar")),
+        BrowserConfig("com.duckduckgo.mobile.android", listOf("com.duckduckgo.mobile.android:id/url_bar")),
+        BrowserConfig("com.transsion.phoenix", listOf("com.transsion.phoenix:id/url_bar"))
     )
 
     private val browserPackages = browserConfigs.map { it.packageName }.toSet()
@@ -60,7 +50,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         "com.android.chrome:id/ephemeral_tab_view",
         "com.android.chrome:id/preview_tab_view",
         "com.android.chrome:id/tab_modal",
-        "com.android.chrome:id/open_new_tab_chip"          // floating chip
+        "com.android.chrome:id/open_new_tab_chip"
     )
 
     private val chromeTabSwitcherIds = listOf(
@@ -70,7 +60,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         "com.android.chrome:id/tab_switcher"
     )
 
-    // ── Possible close button identifiers (add more after debugging) ────────
     private val previewCloseIds = listOf(
         "com.android.chrome:id/close_button",
         "com.android.chrome:id/ephemeral_tab_close",
@@ -79,9 +68,6 @@ class BlockerAccessibilityService : AccessibilityService() {
     )
     private val previewCloseDescriptions = listOf("close", "dismiss", "exit preview", "x")
 
-    /**
-     * Packages exempt from keyword/hostname content scanning.
-     */
     private val contentScanExemptPackages = setOf(
         "com.android.systemui", "com.android.launcher3",
         "com.google.android.apps.nexuslauncher", "com.transsion.xlauncher",
@@ -91,7 +77,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         "com.swiftkey.swiftkeyapp", "com.transsion.inputmethod"
     )
 
-    // ── State ────────────────────────────────────────────────────────────────
     private lateinit var appRepository: AppRepository
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var isServiceReady = false
@@ -106,7 +91,7 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     private var lastBlockedPackage: String? = null
     private var lastBlockTime: Long = 0
-    private val blockCooldownMs = 800L   // increased slightly to avoid jank
+    private val blockCooldownMs = 800L
 
     private var lastBlockedWebsiteKey: String? = null
     private var lastWebsiteBlockTime: Long = 0
@@ -158,7 +143,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         return false
     }
 
-    // ── Lifecycle ────────────────────────────────────────────────────────────
     override fun onServiceConnected() {
         super.onServiceConnected()
         configureServiceInfo()
@@ -213,7 +197,7 @@ class BlockerAccessibilityService : AccessibilityService() {
 
         if (packageName == this.packageName) return
 
-        // ── Preview‑page detection (immediate text + delayed scan) ──────────
+        // ── Preview‑page detection ────────────────────────────────────────
         if (browserPackages.contains(packageName) &&
             event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
 
@@ -237,7 +221,7 @@ class BlockerAccessibilityService : AccessibilityService() {
             return
         }
 
-        // ... rest of the event handler unchanged (Ultra Power, power center, etc.)
+        // Ultra Power / system settings trap
         if (packageName == "com.android.systemui" || packageName.contains("settings")) {
             val rootNode = rootInActiveWindow ?: event.source
             if (rootNode != null) {
@@ -251,6 +235,7 @@ class BlockerAccessibilityService : AccessibilityService() {
             }
         }
 
+        // Power‑center dialog killer
         if (packageName.contains("com.transsion.powercenter") ||
             className.contains("UltraPowerDialogActivity")) {
             val rootNode = rootInActiveWindow ?: event.source
@@ -261,6 +246,7 @@ class BlockerAccessibilityService : AccessibilityService() {
             return
         }
 
+        // Web & content scanner
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
@@ -328,6 +314,7 @@ class BlockerAccessibilityService : AccessibilityService() {
             }
         }
 
+        // Activity & app blocker
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             if (packageName == this.packageName) return
             if (className.isNotEmpty() &&
@@ -342,12 +329,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    /**
-     * ★ NEW – Robust preview closer.
-     * First tries to click a "close" button inside the preview.
-     * If that fails, uses a double‑back with longer delays.
-     * Finally, as a safety net, goes home.
-     */
     private fun closePreviewAndExit(packageName: String) {
         if (TemporaryAccessManager.isAllowed(packageName)) return
 
@@ -359,10 +340,9 @@ class BlockerAccessibilityService : AccessibilityService() {
         lastBlockedPackage = packageName
         lastBlockTime = now
 
-        // 1. Try to find and click a close button in the current window
+        // 1. Try to click the close button directly
         val root = rootInActiveWindow
         if (root != null && findAndClickPreviewClose(root)) {
-            // Wait for the close animation, then go home
             serviceScope.launch {
                 delay(300)
                 performGlobalAction(GLOBAL_ACTION_HOME)
@@ -370,28 +350,22 @@ class BlockerAccessibilityService : AccessibilityService() {
             return
         }
 
-        // 2. Fallback: double back with generous delays
+        // 2. Fallback: back events with generous delays
         performGlobalAction(GLOBAL_ACTION_BACK)
         serviceScope.launch {
-            delay(350)  // increased from 150ms to 350ms
+            delay(350)
             performGlobalAction(GLOBAL_ACTION_BACK)
             delay(350)
-            // After the second back, if we are still in Chrome (preview not closed),
-            // try a third back as a last resort
             if (rootInActiveWindow?.packageName?.toString() == packageName) {
-                performGlobalAction(GLOBAL_ACTION_BACK)
+                performGlobalAction(GLOBAL_ACTION_BACK)   // third back if still in preview
                 delay(200)
             }
             performGlobalAction(GLOBAL_ACTION_HOME)
         }
     }
 
-    /**
-     * Searches the current accessibility tree for a preview close button and clicks it.
-     * Returns true if a click was performed.
-     */
     private fun findAndClickPreviewClose(rootNode: AccessibilityNodeInfo): Boolean {
-        // First try by known view IDs
+        // Search by known View IDs
         for (id in previewCloseIds) {
             val nodes = try { rootNode.findAccessibilityNodeInfosByViewId(id) } catch (_: Exception) { null }
             if (!nodes.isNullOrEmpty()) {
@@ -405,7 +379,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                 }
             }
         }
-        // Then try by text / content description
+        // Search by content description or text
         return findCloseByDescription(rootNode, HashSet())
     }
 
@@ -433,10 +407,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         return false
     }
 
-    // ── URL scanning, helpers, etc. (unchanged) ─────────────────────────────
-    // ... (rest of the code remains identical to the previous version)
-    // I'll include the remaining methods but compactly to keep the full file.
-    
+    // ── URL scanning ───────────────────────────────────────────────────────
     private fun scanForBlockedUrls(rootNode: AccessibilityNodeInfo, packageName: String): Boolean {
         val currentUrl = captureBrowserUrl(rootNode, packageName) ?: return false
 
@@ -529,10 +500,55 @@ class BlockerAccessibilityService : AccessibilityService() {
         return false
     }
 
-    private fun huntAndClickCancel(node: AccessibilityNodeInfo): Boolean { /* unchanged */ return false }
+    private fun huntAndClickCancel(node: AccessibilityNodeInfo): Boolean {
+        val text = node.text?.toString() ?: ""
+        val desc = node.contentDescription?.toString() ?: ""
+        for (keyword in escapeKeywords) {
+            if (text.contains(keyword, ignoreCase = true) || desc.contains(keyword, ignoreCase = true)) {
+                if (node.isClickable) {
+                    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    return true
+                }
+                val parent = node.parent
+                if (parent != null && parent.isClickable) {
+                    parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    return true
+                }
+            }
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            if (huntAndClickCancel(child)) {
+                child.recycle()
+                return true
+            }
+            child.recycle()
+        }
+        return false
+    }
 
-    private fun shouldBlockNow(appInfo: devs.org.ultrafocus.model.AppInfo): Boolean { /* unchanged */ return true }
-    private fun parseTime(t: String): Int { /* unchanged */ return 0 }
+    private fun shouldBlockNow(appInfo: devs.org.ultrafocus.model.AppInfo): Boolean {
+        val timeConfig = appInfo.fromTime
+        if (timeConfig.isNullOrEmpty()) return true
+        val now = Calendar.getInstance()
+        val currentMinute = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
+        for (range in timeConfig.split(",")) {
+            val parts = range.split("-")
+            if (parts.size == 2) {
+                try {
+                    val start = parseTime(parts[0])
+                    val end = parseTime(parts[1])
+                    if (currentMinute in start..end) return true
+                } catch (_: Exception) {}
+            }
+        }
+        return false
+    }
+
+    private fun parseTime(t: String): Int {
+        val split = t.trim().split(":")
+        return split[0].toInt() * 60 + split[1].toInt()
+    }
 
     private fun performRedirectToGoogle() {
         try {
@@ -544,7 +560,9 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     private fun scanForBlockedContent(
-        node: AccessibilityNodeInfo, foregroundPackage: String = "", hostnameCheck: Boolean = false
+        node: AccessibilityNodeInfo,
+        foregroundPackage: String = "",
+        hostnameCheck: Boolean = false
     ): Boolean {
         if (!node.isVisibleToUser) return false
         val text = node.text?.toString()
@@ -566,9 +584,53 @@ class BlockerAccessibilityService : AccessibilityService() {
         return false
     }
 
-    private fun performBlock(packageName: String) { /* unchanged */ }
+    private fun performBlock(packageName: String) {
+        if (packageName == this.packageName) return
+        if (TemporaryAccessManager.isAllowed(packageName)) return
+        try {
+            val currentTime = System.currentTimeMillis()
+            if (lastBlockedPackage == packageName && currentTime - lastBlockTime < blockCooldownMs) {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                return
+            }
+            currentlyBlockedApps.add(packageName)
+            lastBlockedPackage = packageName
+            lastBlockTime = currentTime
+
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            performGlobalAction(GLOBAL_ACTION_HOME)
+
+            val isSoft = SoftBlockManager.isSoftBlocked(this, packageName)
+            serviceScope.launch {
+                delay(50)
+                try {
+                    val intent = if (isSoft) {
+                        val challenge = SoftBlockManager.generateChallenge(this@BlockerAccessibilityService, packageName)
+                        Intent(this@BlockerAccessibilityService, SoftBlockActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                            putExtra("blocked_package", packageName)
+                            putExtra("challenge_code", challenge)
+                        }
+                    } else {
+                        Intent(this@BlockerAccessibilityService, BlockedAppActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                            putExtra("blocked_package", packageName)
+                        }
+                    }
+                    startActivity(intent)
+                    delay(1000)
+                    currentlyBlockedApps.remove(packageName)
+                } catch (_: Exception) {
+                    currentlyBlockedApps.remove(packageName)
+                }
+            }
+        } catch (_: Exception) {
+            currentlyBlockedApps.remove(packageName)
+        }
+    }
 
     override fun onInterrupt() {}
+
     override fun onDestroy() {
         super.onDestroy()
         previewClickJob?.cancel()
