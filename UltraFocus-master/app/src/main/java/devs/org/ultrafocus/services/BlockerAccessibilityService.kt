@@ -102,13 +102,6 @@ class BlockerAccessibilityService : AccessibilityService() {
     private var lastWebsiteBlockTime: Long = 0
     private val websiteBlockCooldownMs = 1500L
 
-    // Preview-page detection is click-armed: only after a user actually taps a
-    // browser preview surface do we inspect the next browser page/content state.
-    private var browserPreviewArmedPackage: String? = null
-    private var browserPreviewArmedUntil: Long = 0L
-    private var browserPreviewQuery: String = ""
-    private val browserPreviewArmWindowMs = 5000L
-
     private val escapeKeywords = listOf("Cancel", "Deny", "No", "Close", "Quit", "Back")
 
     /**
@@ -153,111 +146,6 @@ class BlockerAccessibilityService : AccessibilityService() {
             if (!nodes.isNullOrEmpty()) {
                 nodes.forEach { runCatching { it.recycle() } }
                 return true
-            }
-        }
-        return false
-    }
-
-    private fun isBrowserPreviewArmed(packageName: String): Boolean {
-        val now = System.currentTimeMillis()
-        if (browserPreviewArmedPackage != packageName) return false
-        if (now > browserPreviewArmedUntil) {
-            browserPreviewArmedPackage = null
-            browserPreviewArmedUntil = 0L
-            browserPreviewQuery = ""
-            return false
-        }
-        return true
-    }
-
-    private fun shouldBlockBrowserPreview(
-        rootNode: AccessibilityNodeInfo,
-        packageName: String
-    ): Boolean {
-        val pageText = collectVisibleText(rootNode).lowercase()
-        val currentUrl = captureBrowserUrl(rootNode, packageName).orEmpty()
-        val searchQuery = extractSearchQuery(currentUrl).lowercase()
-        val armingQuery = browserPreviewQuery.lowercase()
-
-        // Only block if the armed preview looks like it is opening a blocked
-        // destination. This deliberately ignores passive mentions on Google
-        // results pages and only reacts to the intentional preview-open path.
-        for (host in blockedHostsCache) {
-            val hostRoot = host.substringBefore('.').lowercase()
-            if (hostRoot.length < 3) continue
-            if (textMatchesHost(pageText, hostRoot)) return true
-            if (textMatchesHost(searchQuery, hostRoot)) return true
-            if (textMatchesHost(armingQuery, hostRoot)) return true
-        }
-        return false
-    }
-
-    private fun extractSearchQuery(rawUrl: String): String {
-        val clean = rawUrl.trim()
-        if (clean.isBlank()) return ""
-        val normalized = if (clean.startsWith("http://") || clean.startsWith("https://")) {
-            clean
-        } else {
-            "https://$clean"
-        }
-        return try {
-            val uri = Uri.parse(normalized)
-            val keys = listOf("q", "query", "search_query", "text")
-            for (key in keys) {
-                val value = uri.getQueryParameter(key)
-                if (!value.isNullOrBlank()) return value
-            }
-            ""
-        } catch (_: Exception) {
-            ""
-        }
-    }
-
-    private fun textMatchesHost(text: String, hostRoot: String): Boolean {
-        if (text.isBlank() || hostRoot.isBlank()) return false
-        val normalizedText = text.lowercase().replace(Regex("[^a-z0-9]+"), " ")
-        val normalizedHost = hostRoot.lowercase().replace(Regex("[^a-z0-9]+"), "")
-        if (normalizedHost.length < 3) return false
-        return normalizedText.contains(normalizedHost)
-    }
-
-    private fun collectVisibleText(node: AccessibilityNodeInfo): String {
-        val builder = StringBuilder()
-
-        fun walk(current: AccessibilityNodeInfo) {
-            if (!current.isVisibleToUser) return
-            current.text?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let {
-                builder.append(it).append(' ')
-            }
-            current.contentDescription?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let {
-                builder.append(it).append(' ')
-            }
-            for (i in 0 until current.childCount) {
-                val child = current.getChild(i) ?: continue
-                try {
-                    walk(child)
-                } finally {
-                    child.recycle()
-                }
-            }
-        }
-
-        walk(node)
-        return builder.toString().trim()
-    }
-
-    private fun nodeContainsText(node: AccessibilityNodeInfo, needle: String): Boolean {
-        if (needle.isBlank()) return false
-        val text = node.text?.toString().orEmpty()
-        val desc = node.contentDescription?.toString().orEmpty()
-        if (text.contains(needle, ignoreCase = true) ||
-            desc.contains(needle, ignoreCase = true)) return true
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            try {
-                if (nodeContainsText(child, needle)) return true
-            } finally {
-                child.recycle()
             }
         }
         return false
@@ -322,29 +210,27 @@ class BlockerAccessibilityService : AccessibilityService() {
         // 1. Self-immunity
         if (packageName == this.packageName) return
 
+        // Preview pages are a special case: if the user taps Chrome's
+        // "Preview page" surface, block immediately. Preview pages often keep
+        // the Google search URL, so waiting for a URL change misses them.
+        if (browserPackages.contains(packageName) &&
+            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+
+            val clickSource = event.source
+            val clickRoot = rootInActiveWindow
+            val previewOpened =
+                findPreviewTriggerFromNode(clickSource) ||
+                findPreviewTriggerFromNode(clickRoot)
+
+            if (previewOpened) {
+                performBlock(packageName)
+                return
+            }
+        }
+
         // 1b. Split screen dangerous-package guard — checked inside the throttled
         // scan loop below so it runs every 50ms rather than relying on
         // TYPE_WINDOWS_CHANGED alone (unreliable on some OEMs).
-
-        // Browser preview arming:
-        // Chrome exposes "Preview page" as a click target even when the URL
-        // bar stays on Google. That click is the only reliable signal that the
-        // user intentionally opened a preview, so we arm a short-lived window
-        // here and only inspect browser page content during that window.
-        if (browserPackages.contains(packageName) &&
-            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
-            val clickNode = event.source ?: rootInActiveWindow
-            val clickRoot = rootInActiveWindow ?: event.source
-            if (clickNode != null && nodeContainsText(clickNode, "Preview page")) {
-                browserPreviewArmedPackage = packageName
-                browserPreviewArmedUntil = System.currentTimeMillis() + browserPreviewArmWindowMs
-                browserPreviewQuery = if (clickRoot != null) {
-                    captureBrowserUrl(clickRoot, packageName).orEmpty()
-                } else {
-                    ""
-                }
-            }
-        }
 
         // 2. Ultra Power / system settings trap
         if (packageName == "com.android.systemui" || packageName.contains("settings")) {
@@ -429,21 +315,14 @@ class BlockerAccessibilityService : AccessibilityService() {
                         // URL check first — handles normal browsing.
                         if (scanForBlockedUrls(rootNode, packageName)) return
 
+                        // Hostname content check — only when the address bar view
+                        // EXISTS in the tree (i.e. we are viewing an actual page).
+                        // Skipped for tab switcher / tab groups / history /
+                        // bookmarks / browser settings — those screens don't have
+                        // an address bar node and were causing false positives by
+                        // matching blocked domain names in tab titles and entries.
                         val inPageView = isBrowserInPageView(rootNode, packageName)
-                        val previewArmed = isBrowserPreviewArmed(packageName)
-
-                        // Preview/opened-content blocking:
-                        // If the user tapped Chrome's "Preview page" surface,
-                        // block only when that click is still within its short
-                        // arm window and the browser has entered a page-like
-                        // state. This avoids passive Google result text from
-                        // triggering a block while still catching the opened
-                        // preview itself.
-                        if (inPageView && previewArmed &&
-                            shouldBlockBrowserPreview(rootNode, packageName)) {
-                            browserPreviewArmedPackage = null
-                            browserPreviewArmedUntil = 0L
-                            browserPreviewQuery = ""
+                        if (inPageView && scanForBlockedContent(rootNode, packageName, hostnameCheck = true)) {
                             performBlock(packageName)
                             return
                         }
@@ -575,6 +454,61 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+    private fun containsPreviewTrigger(text: String): Boolean {
+        val normalized = text.lowercase()
+        return normalized.contains("preview page") ||
+            normalized.contains("open preview") ||
+            normalized.contains("preview")
+    }
+
+    private fun findPreviewTriggerFromNode(node: AccessibilityNodeInfo?): Boolean {
+        if (node == null) return false
+
+        val visited = HashSet<Int>()
+        var current: AccessibilityNodeInfo? = node
+        var depth = 0
+
+        while (current != null && depth < 6) {
+            if (findPreviewTriggerFromNodeWithVisited(current, visited)) return true
+            val parent = current.parent ?: break
+            current = parent
+            depth++
+        }
+        return false
+    }
+
+    private fun findPreviewTriggerFromNodeWithVisited(
+        node: AccessibilityNodeInfo?,
+        visited: MutableSet<Int>
+    ): Boolean {
+        if (node == null) return false
+
+        val key = System.identityHashCode(node)
+        if (!visited.add(key)) return false
+
+        val text = listOfNotNull(
+            node.text?.toString(),
+            node.contentDescription?.toString()
+        ).joinToString(" ").trim()
+
+        if (text.isNotBlank() && containsPreviewTrigger(text)) {
+            return true
+        }
+
+        val childCount = node.childCount
+        for (i in 0 until childCount) {
+            val child = node.getChild(i)
+            if (child != null) {
+                try {
+                    if (findPreviewTriggerFromNodeWithVisited(child, visited)) return true
+                } finally {
+                    child.recycle()
+                }
+            }
+        }
+        return false
+    }
+
     private fun huntAndClickCancel(node: AccessibilityNodeInfo): Boolean {
         val text = node.text?.toString() ?: ""
         val desc = node.contentDescription?.toString() ?: ""
