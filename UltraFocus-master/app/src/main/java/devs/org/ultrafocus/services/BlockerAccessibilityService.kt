@@ -56,7 +56,6 @@ class BlockerAccessibilityService : AccessibilityService() {
     private val browserPackages = browserConfigs.map { it.packageName }.toSet()
 
     // ── Chrome preview / ephemeral tab view IDs ─────────────────────────────
-    // These are present when the browser shows an in‑app preview (hidden address bar)
     private val chromePreviewIds = listOf(
         "com.android.chrome:id/ephemeral_tab_view",
         "com.android.chrome:id/preview_tab_view",
@@ -74,25 +73,20 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     /**
      * Packages that are NEVER subject to keyword or hostname content scanning.
-     * These are system-level packages where a false positive would break core
-     * device functionality (can't use keyboard, home screen, notifications etc.)
-     *
-     * Note: these packages CAN still be added to the explicit blocked apps list
-     * by the user — the exemption only applies to content scanning.
      */
     private val contentScanExemptPackages = setOf(
-        "com.android.systemui",                      // Notification shade, status bar
-        "com.android.launcher3",                     // Stock launcher
-        "com.google.android.apps.nexuslauncher",     // Pixel launcher
-        "com.transsion.xlauncher",                   // Transsion/HiOS launcher
-        "com.hihonor.android.launcher",              // Honor launcher
-        "com.miui.home",                             // MIUI launcher
-        "com.sec.android.app.launcher",              // Samsung launcher
-        "com.android.inputmethod.latin",             // AOSP keyboard
-        "com.google.android.inputmethod.latin",      // Gboard
-        "com.samsung.android.honeyboard",            // Samsung keyboard
-        "com.swiftkey.swiftkeyapp",                  // SwiftKey
-        "com.transsion.inputmethod"                  // Transsion keyboard
+        "com.android.systemui",
+        "com.android.launcher3",
+        "com.google.android.apps.nexuslauncher",
+        "com.transsion.xlauncher",
+        "com.hihonor.android.launcher",
+        "com.miui.home",
+        "com.sec.android.app.launcher",
+        "com.android.inputmethod.latin",
+        "com.google.android.inputmethod.latin",
+        "com.samsung.android.honeyboard",
+        "com.swiftkey.swiftkeyapp",
+        "com.transsion.inputmethod"
     )
 
     // ── State ────────────────────────────────────────────────────────────────
@@ -103,8 +97,6 @@ class BlockerAccessibilityService : AccessibilityService() {
     private val currentlyBlockedApps = mutableSetOf<String>()
     private var blockedAppInfos: List<devs.org.ultrafocus.model.AppInfo> = emptyList()
 
-    // Cached set of blocked hostnames — kept in sync with WebsiteBlockManager.
-    // Used by scanForBlockedContent so reader/preview mode can't bypass URL detection.
     @Volatile private var blockedHostsCache: Set<String> = emptySet()
 
     private var lastScanTime: Long = 0
@@ -114,29 +106,22 @@ class BlockerAccessibilityService : AccessibilityService() {
     private var lastBlockTime: Long = 0
     private val blockCooldownMs = 500L
 
-    // Throttle website blocks
     private var lastBlockedWebsiteKey: String? = null
     private var lastWebsiteBlockTime: Long = 0
     private val websiteBlockCooldownMs = 1500L
 
-    // Job for the delayed scan that runs after a click event (catches preview loads)
+    // Job for the delayed scan after a click (catches preview loads)
     private var previewClickJob: Job? = null
 
     private val escapeKeywords = listOf("Cancel", "Deny", "No", "Close", "Quit", "Back")
 
-    /**
-     * Packages that could be used to uninstall UltraFocus or install bypass apps.
-     * Only acted on when detected in split screen — single-window use is fine
-     * (e.g. updating apps legitimately). Split screen is the specific exploit
-     * because it lets these apps run alongside a blocked app simultaneously.
-     */
     private val dangerousPackages = setOf(
-        "com.android.vending",                   // Play Store
-        "com.android.packageinstaller",          // Stock package installer
-        "com.google.android.packageinstaller",   // Google package installer
-        "com.transsion.packageinstaller",        // Transsion variant
-        "com.miui.packageinstaller",             // MIUI variant
-        "com.samsung.android.packageinstaller"  // Samsung variant
+        "com.android.vending",
+        "com.android.packageinstaller",
+        "com.google.android.packageinstaller",
+        "com.transsion.packageinstaller",
+        "com.miui.packageinstaller",
+        "com.samsung.android.packageinstaller"
     )
 
     private fun isDangerousPackage(pkg: String) =
@@ -144,15 +129,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         pkg.contains("packageinstaller", ignoreCase = true) ||
         pkg.contains("packagemanager", ignoreCase = true)
 
-    /**
-     * Returns true only when the browser is showing an actual web page —
-     * i.e., the address bar view exists in the accessibility tree.
-     *
-     * When false, we're in a browser-internal UI screen (tab switcher, tab
-     * groups, new tab page, downloads, history, bookmarks, settings) where
-     * blocked domain names appearing as tab titles or history entries must NOT
-     * trigger a block — doing so was causing the tab groups false positive.
-     */
     private fun isBrowserInPageView(
         rootNode: AccessibilityNodeInfo,
         packageName: String
@@ -171,15 +147,8 @@ class BlockerAccessibilityService : AccessibilityService() {
         return false
     }
 
-    /**
-     * Returns true when Chrome is showing an in‑app preview (ephemeral tab).
-     * In this mode the address bar is hidden, but we still need to scan for
-     * blocked hostnames because the page content is visible.
-     */
     private fun isChromePreview(rootNode: AccessibilityNodeInfo, packageName: String): Boolean {
         if (packageName != "com.android.chrome") return false
-
-        // If any tab switcher element is visible, we are NOT inside a preview
         for (id in chromeTabSwitcherIds) {
             val nodes = try {
                 rootNode.findAccessibilityNodeInfosByViewId(id)
@@ -189,8 +158,6 @@ class BlockerAccessibilityService : AccessibilityService() {
                 return false
             }
         }
-
-        // Look for a known preview container or the "Open in new tab" chip
         for (id in chromePreviewIds) {
             val nodes = try {
                 rootNode.findAccessibilityNodeInfosByViewId(id)
@@ -221,7 +188,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
                 AccessibilityEvent.TYPE_VIEW_SCROLLED or
-                AccessibilityEvent.TYPE_VIEW_CLICKED or      // added to catch preview taps
+                AccessibilityEvent.TYPE_VIEW_CLICKED or
                 AccessibilityEvent.TYPE_WINDOWS_CHANGED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = flags or
@@ -239,7 +206,6 @@ class BlockerAccessibilityService : AccessibilityService() {
                 }
             } catch (_: Exception) {}
         }
-        // Refresh blocked hostname cache for reader-mode detection.
         serviceScope.launch(Dispatchers.IO) {
             try {
                 val hosts = WebsiteBlockManager.getRules(this@BlockerAccessibilityService)
@@ -258,14 +224,9 @@ class BlockerAccessibilityService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
         val className = event.className?.toString() ?: ""
 
-        // 1. Self-immunity
         if (packageName == this.packageName) return
 
-        // ── Preview-page detection (enhanced) ────────────────────────────────
-        // When the user taps inside a browser (especially on a "Preview page" chip),
-        // we first check the entire screen for preview‑trigger text, and if found we
-        // block immediately. Otherwise we schedule a delayed scan because the preview
-        // content may appear a few frames later.
+        // ── Preview‑page detection (enhanced) ────────────────────────────────
         if (browserPackages.contains(packageName) &&
             event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
 
@@ -273,12 +234,12 @@ class BlockerAccessibilityService : AccessibilityService() {
 
             // Immediate text check: "Preview page" / "Open preview" visible anywhere
             if (root != null && findPreviewTriggerFromNode(root)) {
-                performBlock(packageName)
+                // ★ NEW: use the preview‑specific close routine instead of generic block
+                closePreviewAndExit(packageName)
                 return
             }
 
             // Cancel any pending delayed scan and schedule a new one.
-            // After ~200ms the preview will have loaded; we then scan URLs & content.
             previewClickJob?.cancel()
             previewClickJob = serviceScope.launch {
                 delay(200)
@@ -286,18 +247,13 @@ class BlockerAccessibilityService : AccessibilityService() {
                 if (delayedRoot.packageName?.toString() == packageName) {
                     if (scanForBlockedUrls(delayedRoot, packageName) ||
                         scanForBlockedContent(delayedRoot, packageName, hostnameCheck = true)) {
-                        performBlock(packageName)
+                        // ★ Use the same close routine for delayed preview detection
+                        closePreviewAndExit(packageName)
                     }
                 }
             }
-            // Return – the delayed scan will handle the actual block if needed,
-            // and we avoid duplicate actions from subsequent content-change events.
             return
         }
-
-        // 1b. Split screen dangerous-package guard — checked inside the throttled
-        // scan loop below so it runs every 50ms rather than relying on
-        // TYPE_WINDOWS_CHANGED alone (unreliable on some OEMs).
 
         // 2. Ultra Power / system settings trap
         if (packageName == "com.android.systemui" || packageName.contains("settings")) {
@@ -361,30 +317,28 @@ class BlockerAccessibilityService : AccessibilityService() {
                         return
                     }
                 }
-                // ─────────────────────────────────────────────────────────────
                 val rootNode = rootInActiveWindow ?: event.source
                 if (rootNode != null) {
                     val rootPkg = rootNode.packageName?.toString().orEmpty()
                     if (rootPkg == this.packageName) return
 
                     if (browserPackages.contains(packageName)) {
-                        // ── Browser scan ──────────────────────────────────────
-                        // URL check first — handles normal browsing.
                         if (scanForBlockedUrls(rootNode, packageName)) return
 
-                        // Determine if we should run the hostname content check.
-                        // We do it when the address bar is visible (normal page view)
-                        // OR when Chrome is in preview/ephemeral tab mode.
                         val inPageView = isBrowserInPageView(rootNode, packageName)
                         val inPreview = isChromePreview(rootNode, packageName)
 
                         if ((inPageView || inPreview) &&
                             scanForBlockedContent(rootNode, packageName, hostnameCheck = true)) {
-                            performBlock(packageName)
+                            // If we’re in a preview, use the close routine; otherwise normal block
+                            if (inPreview) {
+                                closePreviewAndExit(packageName)
+                            } else {
+                                performBlock(packageName)
+                            }
                             return
                         }
                     } else {
-                        // ── Non-browser content / keyword scan ────────────────
                         if (!contentScanExemptPackages.contains(packageName) &&
                             scanForBlockedContent(rootNode, packageName, hostnameCheck = false)) {
                             performBlock(packageName)
@@ -411,6 +365,34 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * ★ New: Closes Chrome’s preview / ephemeral tab by hitting back twice,
+     * then returns to home. This guarantees the preview is fully dismissed.
+     */
+    private fun closePreviewAndExit(packageName: String) {
+        if (TemporaryAccessManager.isAllowed(packageName)) return
+
+        // Throttle to avoid rapid successive actions
+        val now = System.currentTimeMillis()
+        if (lastBlockedPackage == packageName && now - lastBlockTime < blockCooldownMs) {
+            // Already closed recently; just ensure we're on home
+            performGlobalAction(GLOBAL_ACTION_HOME)
+            return
+        }
+        lastBlockedPackage = packageName
+        lastBlockTime = now
+
+        // Step 1: Back out of the preview (first back)
+        performGlobalAction(GLOBAL_ACTION_BACK)
+        // Step 2: Wait a beat, then another back to fully exit the ephemeral tab
+        serviceScope.launch {
+            delay(150)
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            delay(150)
+            performGlobalAction(GLOBAL_ACTION_HOME)
+        }
+    }
+
     // ── URL scanning ─────────────────────────────────────────────────────────
     private fun scanForBlockedUrls(
         rootNode: AccessibilityNodeInfo,
@@ -418,7 +400,6 @@ class BlockerAccessibilityService : AccessibilityService() {
     ): Boolean {
         val currentUrl = captureBrowserUrl(rootNode, packageName) ?: return false
 
-        // Allowlist mode check — if enabled, block any URL not in the allowlist.
         if (WebAllowlistManager.isBlockedByAllowlist(this, currentUrl)) {
             val blockKey = WebAllowlistManager::class.java.simpleName
             val now = System.currentTimeMillis()
@@ -445,7 +426,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         tryRedirectBrowserTab(rootNode, packageName)
         performGlobalAction(GLOBAL_ACTION_HOME)
         performRedirectToGoogle()
-
         return true
     }
 
@@ -454,14 +434,11 @@ class BlockerAccessibilityService : AccessibilityService() {
         packageName: String
     ) {
         val config = browserConfigs.firstOrNull { it.packageName == packageName } ?: return
-
         for (viewId in config.addressBarIds) {
             val nodes = try {
                 rootNode.findAccessibilityNodeInfosByViewId(viewId)
             } catch (_: Exception) { null }
-
             if (nodes.isNullOrEmpty()) continue
-
             try {
                 val urlNode = nodes.firstOrNull() ?: continue
                 urlNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
@@ -484,14 +461,11 @@ class BlockerAccessibilityService : AccessibilityService() {
     ): String? {
         val config = browserConfigs.firstOrNull { it.packageName == packageName }
             ?: return null
-
         for (viewId in config.addressBarIds) {
             val nodes = try {
                 rootNode.findAccessibilityNodeInfosByViewId(viewId)
             } catch (_: Exception) { null }
-
             if (nodes.isNullOrEmpty()) continue
-
             try {
                 for (node in nodes) {
                     val text = node.text?.toString()?.trim().orEmpty()
@@ -514,10 +488,6 @@ class BlockerAccessibilityService : AccessibilityService() {
             normalized.contains("preview")
     }
 
-    /**
-     * Searches the accessibility tree starting from [node] for any visible text
-     * that indicates a "Preview page" tap target.
-     */
     private fun findPreviewTriggerFromNode(node: AccessibilityNodeInfo?): Boolean {
         if (node == null) return false
         return findPreviewTriggerFromNodeWithVisited(node, HashSet())
@@ -528,19 +498,13 @@ class BlockerAccessibilityService : AccessibilityService() {
         visited: MutableSet<Int>
     ): Boolean {
         if (node == null) return false
-
         val key = System.identityHashCode(node)
         if (!visited.add(key)) return false
-
         val text = listOfNotNull(
             node.text?.toString(),
             node.contentDescription?.toString()
         ).joinToString(" ").trim()
-
-        if (text.isNotBlank() && containsPreviewTrigger(text)) {
-            return true
-        }
-
+        if (text.isNotBlank() && containsPreviewTrigger(text)) return true
         val childCount = node.childCount
         for (i in 0 until childCount) {
             val child = node.getChild(i)
@@ -617,34 +581,18 @@ class BlockerAccessibilityService : AccessibilityService() {
         } catch (_: Exception) {}
     }
 
-    /**
-     * Recursively scans visible text nodes for blocked keywords and, optionally,
-     * blocked hostnames.
-     *
-     * hostnameCheck is only true when called for a browser that is confirmed to
-     * be showing an actual web page (address bar exists) OR a Chrome in‑app
-     * preview. This prevents tab groups, history, search results, and other
-     * browser UI from triggering false positives, while still catching reader
-     * mode / preview mode where a blocked domain's content is rendered without
-     * the URL bar updating.
-     */
     private fun scanForBlockedContent(
         node: AccessibilityNodeInfo,
         foregroundPackage: String = "",
         hostnameCheck: Boolean = false
     ): Boolean {
         if (!node.isVisibleToUser) return false
-
         val text = node.text?.toString()
         val desc = node.contentDescription?.toString()
-
-        // Keyword check — runs for all non-exempt packages
         if (!text.isNullOrEmpty() &&
             ContentBlockManager.containsBlockedContent(this, text)) return true
         if (!desc.isNullOrEmpty() &&
             ContentBlockManager.containsBlockedContent(this, desc)) return true
-
-        // Hostname check — only in page-view or preview browser contexts
         if (hostnameCheck && blockedHostsCache.isNotEmpty()) {
             val combined = listOfNotNull(text, desc).joinToString(" ").lowercase()
             if (combined.isNotBlank()) {
@@ -653,7 +601,6 @@ class BlockerAccessibilityService : AccessibilityService() {
                 }
             }
         }
-
         val childCount = node.childCount
         for (i in 0 until childCount) {
             val child = node.getChild(i)
@@ -665,19 +612,9 @@ class BlockerAccessibilityService : AccessibilityService() {
         return false
     }
 
-    /**
-     * Central block dispatcher.
-     *
-     * Soft-blocked apps → SoftBlockActivity (UUID challenge, then access granted).
-     * Hard-blocked apps → BlockedAppActivity (full block with emergency override).
-     *
-     * TemporaryAccessManager is checked first so that a successfully completed
-     * soft-block challenge (or emergency override) is always honoured.
-     */
     private fun performBlock(packageName: String) {
         if (packageName == this.packageName) return
         if (TemporaryAccessManager.isAllowed(packageName)) return
-
         try {
             val currentTime = System.currentTimeMillis()
             if (lastBlockedPackage == packageName &&
@@ -685,16 +622,12 @@ class BlockerAccessibilityService : AccessibilityService() {
                 performGlobalAction(GLOBAL_ACTION_BACK)
                 return
             }
-
             currentlyBlockedApps.add(packageName)
             lastBlockedPackage = packageName
             lastBlockTime = currentTime
-
             performGlobalAction(GLOBAL_ACTION_BACK)
             performGlobalAction(GLOBAL_ACTION_HOME)
-
             val isSoft = SoftBlockManager.isSoftBlocked(this, packageName)
-
             serviceScope.launch {
                 delay(50)
                 try {
