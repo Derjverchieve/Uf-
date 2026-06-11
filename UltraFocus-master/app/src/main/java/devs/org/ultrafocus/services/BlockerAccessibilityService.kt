@@ -34,7 +34,11 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     private val browserConfigs = listOf(
         BrowserConfig("com.android.chrome",
-            listOf("com.android.chrome:id/url_bar")),
+            listOf(
+                "com.android.chrome:id/url_bar",
+                "com.android.chrome:id/custom_tabs_url", // Catches Custom Tabs
+                "com.android.chrome:id/url"              // Catches Ephemeral/Preview URL
+            )),
         BrowserConfig("org.mozilla.firefox",
             listOf("org.mozilla.firefox:id/mozac_browser_toolbar_url_view")),
         BrowserConfig("com.microsoft.emmx",
@@ -210,24 +214,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         // 1. Self-immunity
         if (packageName == this.packageName) return
 
-        // Preview pages are a special case: if the user taps Chrome's
-        // "Preview page" surface, block immediately. Preview pages often keep
-        // the Google search URL, so waiting for a URL change misses them.
-        if (browserPackages.contains(packageName) &&
-            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
-
-            val clickSource = event.source
-            val clickRoot = rootInActiveWindow
-            val previewOpened =
-                findPreviewTriggerFromNode(clickSource) ||
-                findPreviewTriggerFromNode(clickRoot)
-
-            if (previewOpened) {
-                performBlock(packageName)
-                return
-            }
-        }
-
         // 1b. Split screen dangerous-package guard — checked inside the throttled
         // scan loop below so it runs every 50ms rather than relying on
         // TYPE_WINDOWS_CHANGED alone (unreliable on some OEMs).
@@ -311,6 +297,17 @@ class BlockerAccessibilityService : AccessibilityService() {
                     if (rootPkg == this.packageName) return
 
                     if (browserPackages.contains(packageName)) {
+                        
+                        // ── Chrome Preview Bottom Sheet Killer ────────────────────
+                        if (packageName == "com.android.chrome" && isChromePreview(rootNode)) {
+                            // If the preview sheet contains a blocked host, snap it shut
+                            if (scanForBlockedContent(rootNode, packageName, hostnameCheck = true)) {
+                                performGlobalAction(GLOBAL_ACTION_BACK)
+                                return
+                            }
+                        }
+                        // ──────────────────────────────────────────────────────────
+
                         // ── Browser scan ──────────────────────────────────────
                         // URL check first — handles normal browsing.
                         if (scanForBlockedUrls(rootNode, packageName)) return
@@ -454,59 +451,26 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
-    private fun containsPreviewTrigger(text: String): Boolean {
-        val normalized = text.lowercase()
-        return normalized.contains("preview page") ||
-            normalized.contains("open preview") ||
-            normalized.contains("preview")
-    }
+    
+    /**
+     * Detects if the current active window is a Chrome Ephemeral Tab (Preview)
+     * or a Custom Tab bottom sheet.
+     */
+    private fun isChromePreview(rootNode: AccessibilityNodeInfo): Boolean {
+        val ephemeral = try {
+            rootNode.findAccessibilityNodeInfosByViewId("com.android.chrome:id/ephemeral_tab_panel")
+        } catch (_: Exception) { emptyList() }
+        
+        val bottomSheet = try {
+            rootNode.findAccessibilityNodeInfosByViewId("com.android.chrome:id/bottom_sheet")
+        } catch (_: Exception) { emptyList() }
 
-    private fun findPreviewTriggerFromNode(node: AccessibilityNodeInfo?): Boolean {
-        if (node == null) return false
+        val isPreview = ephemeral.isNotEmpty() || bottomSheet.isNotEmpty()
 
-        val visited = HashSet<Int>()
-        var current: AccessibilityNodeInfo? = node
-        var depth = 0
+        ephemeral.forEach { runCatching { it.recycle() } }
+        bottomSheet.forEach { runCatching { it.recycle() } }
 
-        while (current != null && depth < 6) {
-            if (findPreviewTriggerFromNodeWithVisited(current, visited)) return true
-            val parent = current.parent ?: break
-            current = parent
-            depth++
-        }
-        return false
-    }
-
-    private fun findPreviewTriggerFromNodeWithVisited(
-        node: AccessibilityNodeInfo?,
-        visited: MutableSet<Int>
-    ): Boolean {
-        if (node == null) return false
-
-        val key = System.identityHashCode(node)
-        if (!visited.add(key)) return false
-
-        val text = listOfNotNull(
-            node.text?.toString(),
-            node.contentDescription?.toString()
-        ).joinToString(" ").trim()
-
-        if (text.isNotBlank() && containsPreviewTrigger(text)) {
-            return true
-        }
-
-        val childCount = node.childCount
-        for (i in 0 until childCount) {
-            val child = node.getChild(i)
-            if (child != null) {
-                try {
-                    if (findPreviewTriggerFromNodeWithVisited(child, visited)) return true
-                } finally {
-                    child.recycle()
-                }
-            }
-        }
-        return false
+        return isPreview
     }
 
     private fun huntAndClickCancel(node: AccessibilityNodeInfo): Boolean {
