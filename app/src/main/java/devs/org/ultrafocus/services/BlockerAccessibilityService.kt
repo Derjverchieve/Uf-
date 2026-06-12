@@ -26,36 +26,58 @@ import java.util.Calendar
 
 class BlockerAccessibilityService : AccessibilityService() {
 
-    // ── Browser config: map package → address-bar view IDs ──────────────────
     private data class BrowserConfig(
         val packageName: String,
         val addressBarIds: List<String>
     )
 
     private val browserConfigs = listOf(
-        BrowserConfig("com.android.chrome",
-            listOf("com.android.chrome:id/url_bar")),
-        BrowserConfig("org.mozilla.firefox",
-            listOf("org.mozilla.firefox:id/mozac_browser_toolbar_url_view")),
-        BrowserConfig("com.microsoft.emmx",
-            listOf("com.microsoft.emmx:id/url_bar")),
-        BrowserConfig("com.sec.android.app.sbrowser",
-            listOf("com.sec.android.app.sbrowser:id/location_bar_edit_text")),
-        BrowserConfig("com.opera.browser",
-            listOf("com.opera.browser:id/url_field")),
-        BrowserConfig("com.opera.mini.native",
-            listOf("com.opera.mini.native:id/url_field")),
-        BrowserConfig("com.brave.browser",
-            listOf("com.brave.browser:id/url_bar")),
-        BrowserConfig("com.duckduckgo.mobile.android",
-            listOf("com.duckduckgo.mobile.android:id/url_bar")),
-        BrowserConfig("com.transsion.phoenix",
-            listOf("com.transsion.phoenix:id/url_bar"))
+        BrowserConfig("com.android.chrome", listOf("com.android.chrome:id/url_bar")),
+        BrowserConfig("org.mozilla.firefox", listOf("org.mozilla.firefox:id/mozac_browser_toolbar_url_view")),
+        BrowserConfig("com.microsoft.emmx", listOf("com.microsoft.emmx:id/url_bar")),
+        BrowserConfig("com.sec.android.app.sbrowser", listOf("com.sec.android.app.sbrowser:id/location_bar_edit_text")),
+        BrowserConfig("com.opera.browser", listOf("com.opera.browser:id/url_field")),
+        BrowserConfig("com.opera.mini.native", listOf("com.opera.mini.native:id/url_field")),
+        BrowserConfig("com.brave.browser", listOf("com.brave.browser:id/url_bar")),
+        BrowserConfig("com.duckduckgo.mobile.android", listOf("com.duckduckgo.mobile.android:id/url_bar")),
+        BrowserConfig("com.transsion.phoenix", listOf("com.transsion.phoenix:id/url_bar"))
     )
 
     private val browserPackages = browserConfigs.map { it.packageName }.toSet()
 
-    // ── State ────────────────────────────────────────────────────────────────
+    // Chrome preview / ephemeral tab IDs
+    private val chromePreviewIds = listOf(
+        "com.android.chrome:id/ephemeral_tab_view",
+        "com.android.chrome:id/preview_tab_view",
+        "com.android.chrome:id/tab_modal",
+        "com.android.chrome:id/open_new_tab_chip"
+    )
+
+    private val chromeTabSwitcherIds = listOf(
+        "com.android.chrome:id/tab_switcher_toolbar",
+        "com.android.chrome:id/tab_switcher_recycler_view",
+        "com.android.chrome:id/carousel_tab_switcher",
+        "com.android.chrome:id/tab_switcher"
+    )
+
+    private val previewCloseIds = listOf(
+        "com.android.chrome:id/close_button",
+        "com.android.chrome:id/ephemeral_tab_close",
+        "com.android.chrome:id/preview_close",
+        "com.android.chrome:id/action_close"
+    )
+    private val previewCloseDescriptions = listOf("close", "dismiss", "exit preview", "x")
+
+    // Packages exempt from keyword scanning
+    private val contentScanExemptPackages = setOf(
+        "com.android.systemui", "com.android.launcher3",
+        "com.google.android.apps.nexuslauncher", "com.transsion.xlauncher",
+        "com.hihonor.android.launcher", "com.miui.home",
+        "com.sec.android.app.launcher", "com.android.inputmethod.latin",
+        "com.google.android.inputmethod.latin", "com.samsung.android.honeyboard",
+        "com.swiftkey.swiftkeyapp", "com.transsion.inputmethod"
+    )
+
     private lateinit var appRepository: AppRepository
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var isServiceReady = false
@@ -63,8 +85,6 @@ class BlockerAccessibilityService : AccessibilityService() {
     private val currentlyBlockedApps = mutableSetOf<String>()
     private var blockedAppInfos: List<devs.org.ultrafocus.model.AppInfo> = emptyList()
 
-    // Cached set of blocked hostnames — kept in sync with WebsiteBlockManager.
-    // Used by scanForBlockedContent so reader/preview mode can't bypass URL detection.
     @Volatile private var blockedHostsCache: Set<String> = emptySet()
 
     private var lastScanTime: Long = 0
@@ -72,36 +92,14 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     private var lastBlockedPackage: String? = null
     private var lastBlockTime: Long = 0
-    private val blockCooldownMs = 500L
+    private val blockCooldownMs = 800L
 
-    // Throttle website blocks
     private var lastBlockedWebsiteKey: String? = null
     private var lastWebsiteBlockTime: Long = 0
     private val websiteBlockCooldownMs = 1500L
 
-    private val escapeKeywords = listOf("Cancel", "Deny", "No", "Close", "Quit", "Back")
+    private var previewClickJob: Job? = null
 
-    /**
-     * Packages that could be used to uninstall UltraFocus or install bypass apps.
-     * Only acted on when detected in split screen — single-window use is fine
-     * (e.g. updating apps legitimately). Split screen is the specific exploit
-     * because it lets these apps run alongside a blocked app simultaneously.
-     */
-    private val dangerousPackages = setOf(
-        "com.android.vending",                   // Play Store
-        "com.android.packageinstaller",          // Stock package installer
-        "com.google.android.packageinstaller",   // Google package installer
-        "com.transsion.packageinstaller",        // Transsion variant
-        "com.miui.packageinstaller",             // MIUI variant
-        "com.samsung.android.packageinstaller"  // Samsung variant
-    )
-
-    private fun isDangerousPackage(pkg: String) =
-        dangerousPackages.contains(pkg) ||
-        pkg.contains("packageinstaller", ignoreCase = true) ||
-        pkg.contains("packagemanager", ignoreCase = true)
-
-    // ── Lifecycle ────────────────────────────────────────────────────────────
     override fun onServiceConnected() {
         super.onServiceConnected()
         configureServiceInfo()
@@ -119,6 +117,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
                 AccessibilityEvent.TYPE_VIEW_SCROLLED or
+                AccessibilityEvent.TYPE_VIEW_CLICKED or
                 AccessibilityEvent.TYPE_WINDOWS_CHANGED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = flags or
@@ -136,9 +135,6 @@ class BlockerAccessibilityService : AccessibilityService() {
                 }
             } catch (_: Exception) {}
         }
-        // Refresh blocked hostname cache for reader-mode detection.
-        // Runs on a background thread since SharedPreferences reads are fast
-        // but we don't want to block the main thread on startup.
         serviceScope.launch(Dispatchers.IO) {
             try {
                 val hosts = WebsiteBlockManager.getRules(this@BlockerAccessibilityService)
@@ -150,46 +146,39 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ── Main event handler ───────────────────────────────────────────────────
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (!isServiceReady || event == null) return
 
         val packageName = event.packageName?.toString() ?: return
         val className = event.className?.toString() ?: ""
 
-        // 1. Self-immunity
         if (packageName == this.packageName) return
 
-        // 1b. Split screen dangerous-package guard — checked inside the throttled
-        // scan loop below so it runs every 50ms rather than relying on
-        // TYPE_WINDOWS_CHANGED alone (unreliable on some OEMs).
+        // ── Preview‑page detection (immediate text trigger + delayed scan) ──
+        if (browserPackages.contains(packageName) &&
+            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
 
-        // 2. Ultra Power / system settings trap
-        if (packageName == "com.android.systemui" || packageName.contains("settings")) {
-            val rootNode = rootInActiveWindow ?: event.source
-            if (rootNode != null) {
-                val matches = rootNode.findAccessibilityNodeInfosByText("Ultra Power")
-                if (!matches.isNullOrEmpty()) {
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                    performGlobalAction(GLOBAL_ACTION_HOME)
-                    matches.forEach { runCatching { it.recycle() } }
-                    return
+            val root = rootInActiveWindow
+            if (root != null && findPreviewTriggerFromNode(root)) {
+                closePreviewAndExit(packageName)
+                return
+            }
+
+            previewClickJob?.cancel()
+            previewClickJob = serviceScope.launch {
+                delay(200)
+                val delayedRoot = rootInActiveWindow ?: return@launch
+                if (delayedRoot.packageName?.toString() == packageName) {
+                    if (scanForBlockedUrls(delayedRoot, packageName) ||
+                        scanForBlockedContent(delayedRoot, packageName, hostnameCheck = true)) {
+                        closePreviewAndExit(packageName)
+                    }
                 }
             }
-        }
-
-        // 3. Power-center dialog killer
-        if (packageName.contains("com.transsion.powercenter") ||
-            className.contains("UltraPowerDialogActivity")) {
-            val rootNode = rootInActiveWindow ?: event.source
-            if (rootNode != null) huntAndClickCancel(rootNode)
-            performGlobalAction(GLOBAL_ACTION_BACK)
-            performGlobalAction(GLOBAL_ACTION_HOME)
-            performBlock(packageName)
             return
         }
 
-        // 4. Web & content scanner
+        // ── Main scanning loop ────────────────────────────────────────────
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
@@ -199,38 +188,55 @@ class BlockerAccessibilityService : AccessibilityService() {
             if (currentTime - lastScanTime > scanIntervalMs) {
                 lastScanTime = currentTime
 
-                // ── Split screen dangerous-package guard ──────────────────────
-                // Check the live window list every scan tick. Only acts when
-                // 2+ windows are visible (split screen / multi-window) so
-                // single-window Play Store use is completely unaffected.
+                // Split‑screen guard
                 val visibleWindows = windows
-                if (!visibleWindows.isNullOrEmpty() && visibleWindows.size >= 2) {
-                    val dangerousPkg = visibleWindows
+                val isRealSplitScreen = !visibleWindows.isNullOrEmpty() &&
+                    visibleWindows.any { window ->
+                        window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER
+                    }
+
+                if (isRealSplitScreen) {
+                    val blockedPkg = visibleWindows!!
                         .mapNotNull { it.root?.packageName?.toString() }
-                        .firstOrNull { isDangerousPackage(it) }
-                    if (dangerousPkg != null) {
-                        performGlobalAction(GLOBAL_ACTION_BACK)
-                        performGlobalAction(GLOBAL_ACTION_HOME)
+                        .firstOrNull { pkg ->
+                            pkg != this.packageName &&
+                            blockedAppInfos.any { it.packageName == pkg && shouldBlockNow(it) }
+                        }
+                    if (blockedPkg != null) {
                         try {
                             val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-                            am.killBackgroundProcesses(dangerousPkg)
+                            am.killBackgroundProcesses(blockedPkg)
                         } catch (_: Exception) {}
-                        serviceScope.launch {
-                            delay(300)
-                            performGlobalAction(GLOBAL_ACTION_HOME)
-                        }
+                        performBlock(blockedPkg)
                         return
                     }
                 }
-                // ─────────────────────────────────────────────────────────────
-                val rootNode = rootInActiveWindow ?: event.source
-                if (rootNode != null) {
-                    if (browserPackages.contains(packageName)) {
-                        if (scanForBlockedUrls(rootNode, packageName)) return
+
+                val rootNode = rootInActiveWindow ?: event.source ?: return
+                val rootPkg = rootNode.packageName?.toString().orEmpty()
+                if (rootPkg == this.packageName) return
+
+                if (browserPackages.contains(packageName)) {
+                    // URL check (normal pages)
+                    if (scanForBlockedUrls(rootNode, packageName)) return
+
+                    val inPageView = isBrowserInPageView(rootNode, packageName)
+                    val inPreview = isChromePreview(rootNode, packageName)
+
+                    // Content scan for hostnames – runs for both normal and preview,
+                    // but we only close the preview, never block a normal page from it
+                    if ((inPageView || inPreview) &&
+                        scanForBlockedContent(rootNode, packageName, hostnameCheck = true)) {
+
+                        if (inPreview) {
+                            closePreviewAndExit(packageName)
+                        }
+                        // Do NOT call performBlock for normal pages – URL check is enough
+                        return
                     }
-                    val rootPkg = rootNode.packageName?.toString().orEmpty()
-                    if (rootPkg != this.packageName &&
-                        scanForBlockedContent(rootNode, packageName)) {
+                } else {
+                    if (!contentScanExemptPackages.contains(packageName) &&
+                        scanForBlockedContent(rootNode, packageName, hostnameCheck = false)) {
                         performBlock(packageName)
                         return
                     }
@@ -238,7 +244,7 @@ class BlockerAccessibilityService : AccessibilityService() {
             }
         }
 
-        // 5. Activity & app blocker
+        // Activity & specific screen blocker
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             if (packageName == this.packageName) return
 
@@ -247,6 +253,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                 performBlock(packageName)
                 return
             }
+
             val appInfo = blockedAppInfos.find { it.packageName == packageName }
             if (appInfo != null && shouldBlockNow(appInfo)) {
                 performBlock(packageName)
@@ -254,20 +261,138 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ── URL scanning ─────────────────────────────────────────────────────────
-    private fun scanForBlockedUrls(
-        rootNode: AccessibilityNodeInfo,
-        packageName: String
-    ): Boolean {
+    // ── Preview close logic ───────────────────────────────────────────────
+    private fun closePreviewAndExit(packageName: String) {
+        if (TemporaryAccessManager.isAllowed(packageName)) return
+
+        val now = System.currentTimeMillis()
+        if (lastBlockedPackage == packageName && now - lastBlockTime < blockCooldownMs) {
+            performGlobalAction(GLOBAL_ACTION_HOME)
+            return
+        }
+        lastBlockedPackage = packageName
+        lastBlockTime = now
+
+        val root = rootInActiveWindow
+        if (root != null && findAndClickPreviewClose(root)) {
+            serviceScope.launch {
+                delay(300)
+                performGlobalAction(GLOBAL_ACTION_HOME)
+            }
+            return
+        }
+
+        performGlobalAction(GLOBAL_ACTION_BACK)
+        serviceScope.launch {
+            delay(350)
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            delay(350)
+            if (rootInActiveWindow?.packageName?.toString() == packageName) {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                delay(200)
+            }
+            performGlobalAction(GLOBAL_ACTION_HOME)
+        }
+    }
+
+    private fun findAndClickPreviewClose(rootNode: AccessibilityNodeInfo): Boolean {
+        for (id in previewCloseIds) {
+            val nodes = try { rootNode.findAccessibilityNodeInfosByViewId(id) } catch (_: Exception) { null }
+            if (!nodes.isNullOrEmpty()) {
+                for (node in nodes) {
+                    if (node.isClickable) {
+                        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        node.recycle()
+                        return true
+                    }
+                    node.recycle()
+                }
+            }
+        }
+        return findCloseByDescription(rootNode, HashSet())
+    }
+
+    private fun findCloseByDescription(node: AccessibilityNodeInfo, visited: MutableSet<Int>): Boolean {
+        val key = System.identityHashCode(node)
+        if (!visited.add(key)) return false
+
+        val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+        val text = node.text?.toString()?.lowercase() ?: ""
+        if (previewCloseDescriptions.any { desc.contains(it) || text.contains(it) }) {
+            if (node.isClickable) {
+                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                return true
+            }
+        }
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            if (findCloseByDescription(child, visited)) {
+                child.recycle()
+                return true
+            }
+            child.recycle()
+        }
+        return false
+    }
+
+    private fun isBrowserInPageView(rootNode: AccessibilityNodeInfo, packageName: String): Boolean {
+        val config = browserConfigs.firstOrNull { it.packageName == packageName } ?: return false
+        for (viewId in config.addressBarIds) {
+            val nodes = try { rootNode.findAccessibilityNodeInfosByViewId(viewId) } catch (_: Exception) { null }
+            if (!nodes.isNullOrEmpty()) {
+                nodes.forEach { runCatching { it.recycle() } }
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun isChromePreview(rootNode: AccessibilityNodeInfo, packageName: String): Boolean {
+        if (packageName != "com.android.chrome") return false
+        for (id in chromeTabSwitcherIds) {
+            val nodes = try { rootNode.findAccessibilityNodeInfosByViewId(id) } catch (_: Exception) { null }
+            if (!nodes.isNullOrEmpty()) {
+                nodes.forEach { runCatching { it.recycle() } }
+                return false
+            }
+        }
+        for (id in chromePreviewIds) {
+            val nodes = try { rootNode.findAccessibilityNodeInfosByViewId(id) } catch (_: Exception) { null }
+            if (!nodes.isNullOrEmpty()) {
+                nodes.forEach { runCatching { it.recycle() } }
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun captureBrowserUrl(rootNode: AccessibilityNodeInfo, packageName: String): String? {
+        val config = browserConfigs.firstOrNull { it.packageName == packageName } ?: return null
+        for (viewId in config.addressBarIds) {
+            val nodes = try { rootNode.findAccessibilityNodeInfosByViewId(viewId) } catch (_: Exception) { null }
+            if (nodes.isNullOrEmpty()) continue
+            try {
+                for (node in nodes) {
+                    val text = node.text?.toString()?.trim().orEmpty()
+                    val desc = node.contentDescription?.toString()?.trim().orEmpty()
+                    val candidate = if (text.isNotBlank()) text else desc
+                    if (candidate.isNotBlank()) return candidate
+                }
+            } finally {
+                nodes.forEach { runCatching { it.recycle() } }
+            }
+        }
+        return null
+    }
+
+    private fun scanForBlockedUrls(rootNode: AccessibilityNodeInfo, packageName: String): Boolean {
         val currentUrl = captureBrowserUrl(rootNode, packageName) ?: return false
 
-        // Allowlist mode check — if enabled, block any URL not in the allowlist.
-        // This runs before regular block rules so it acts as a global gate.
         if (WebAllowlistManager.isBlockedByAllowlist(this, currentUrl)) {
             val blockKey = WebAllowlistManager::class.java.simpleName
             val now = System.currentTimeMillis()
-            if (blockKey == lastBlockedWebsiteKey &&
-                now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
+            if (blockKey == lastBlockedWebsiteKey && now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
             lastBlockedWebsiteKey = blockKey
             lastWebsiteBlockTime = now
             tryRedirectBrowserTab(rootNode, packageName)
@@ -279,33 +404,22 @@ class BlockerAccessibilityService : AccessibilityService() {
         if (!WebsiteBlockManager.shouldBlockUrl(this, currentUrl)) return false
 
         val blockKey = WebsiteBlockManager.normalizeHost(currentUrl)
-        val now = System.currentTimeMillis()
         if (blockKey == lastBlockedWebsiteKey &&
-            now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
-
+            System.currentTimeMillis() - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
         lastBlockedWebsiteKey = blockKey
-        lastWebsiteBlockTime = now
+        lastWebsiteBlockTime = System.currentTimeMillis()
 
         tryRedirectBrowserTab(rootNode, packageName)
         performGlobalAction(GLOBAL_ACTION_HOME)
         performRedirectToGoogle()
-
         return true
     }
 
-    private fun tryRedirectBrowserTab(
-        rootNode: AccessibilityNodeInfo,
-        packageName: String
-    ) {
+    private fun tryRedirectBrowserTab(rootNode: AccessibilityNodeInfo, packageName: String) {
         val config = browserConfigs.firstOrNull { it.packageName == packageName } ?: return
-
         for (viewId in config.addressBarIds) {
-            val nodes = try {
-                rootNode.findAccessibilityNodeInfosByViewId(viewId)
-            } catch (_: Exception) { null }
-
+            val nodes = try { rootNode.findAccessibilityNodeInfosByViewId(viewId) } catch (_: Exception) { null }
             if (nodes.isNullOrEmpty()) continue
-
             try {
                 val urlNode = nodes.firstOrNull() ?: continue
                 urlNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
@@ -322,59 +436,54 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun captureBrowserUrl(
-        rootNode: AccessibilityNodeInfo,
-        packageName: String
-    ): String? {
-        val config = browserConfigs.firstOrNull { it.packageName == packageName }
-            ?: return null
-
-        for (viewId in config.addressBarIds) {
-            val nodes = try {
-                rootNode.findAccessibilityNodeInfosByViewId(viewId)
-            } catch (_: Exception) { null }
-
-            if (nodes.isNullOrEmpty()) continue
-
-            try {
-                for (node in nodes) {
-                    val text = node.text?.toString()?.trim().orEmpty()
-                    val desc = node.contentDescription?.toString()?.trim().orEmpty()
-                    val candidate = if (text.isNotBlank()) text else desc
-                    if (candidate.isNotBlank()) return candidate
-                }
-            } finally {
-                nodes.forEach { runCatching { it.recycle() } }
-            }
-        }
-        return null
+    private fun containsPreviewTrigger(text: String): Boolean {
+        val norm = text.lowercase()
+        return norm.contains("preview page") || norm.contains("open preview") || norm.contains("preview")
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
-    private fun huntAndClickCancel(node: AccessibilityNodeInfo): Boolean {
-        val text = node.text?.toString() ?: ""
-        val desc = node.contentDescription?.toString() ?: ""
-        for (keyword in escapeKeywords) {
-            if (text.contains(keyword, ignoreCase = true) ||
-                desc.contains(keyword, ignoreCase = true)) {
-                if (node.isClickable) {
-                    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    return true
-                }
-                val parent = node.parent
-                if (parent != null && parent.isClickable) {
-                    parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    return true
-                }
-            }
-        }
-        val childCount = node.childCount
-        for (i in 0 until childCount) {
-            val child = node.getChild(i)
-            if (child != null) {
-                if (huntAndClickCancel(child)) return true
+    private fun findPreviewTriggerFromNode(node: AccessibilityNodeInfo?): Boolean {
+        if (node == null) return false
+        return findPreviewTriggerFromNodeWithVisited(node, HashSet())
+    }
+
+    private fun findPreviewTriggerFromNodeWithVisited(node: AccessibilityNodeInfo?, visited: MutableSet<Int>): Boolean {
+        if (node == null) return false
+        val key = System.identityHashCode(node)
+        if (!visited.add(key)) return false
+        val text = listOfNotNull(node.text?.toString(), node.contentDescription?.toString()).joinToString(" ").trim()
+        if (text.isNotBlank() && containsPreviewTrigger(text)) return true
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            if (findPreviewTriggerFromNodeWithVisited(child, visited)) {
                 child.recycle()
+                return true
             }
+            child.recycle()
+        }
+        return false
+    }
+
+    private fun scanForBlockedContent(
+        node: AccessibilityNodeInfo,
+        foregroundPackage: String = "",
+        hostnameCheck: Boolean = false
+    ): Boolean {
+        if (!node.isVisibleToUser) return false
+        val text = node.text?.toString()
+        val desc = node.contentDescription?.toString()
+        if (!text.isNullOrEmpty() && ContentBlockManager.containsBlockedContent(this, text)) return true
+        if (!desc.isNullOrEmpty() && ContentBlockManager.containsBlockedContent(this, desc)) return true
+        if (hostnameCheck && blockedHostsCache.isNotEmpty()) {
+            val combined = listOfNotNull(text, desc).joinToString(" ").lowercase()
+            if (combined.isNotBlank() && blockedHostsCache.any { combined.contains(it) }) return true
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            if (scanForBlockedContent(child, foregroundPackage, hostnameCheck)) {
+                child.recycle()
+                return true
+            }
+            child.recycle()
         }
         return false
     }
@@ -383,8 +492,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         val timeConfig = appInfo.fromTime
         if (timeConfig.isNullOrEmpty()) return true
         val now = Calendar.getInstance()
-        val currentMinute =
-            now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
+        val currentMinute = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
         for (range in timeConfig.split(",")) {
             val parts = range.split("-")
             if (parts.size == 2) {
@@ -405,80 +513,22 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     private fun performRedirectToGoogle() {
         try {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com")).apply {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com")).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 addCategory(Intent.CATEGORY_BROWSABLE)
-            }
-            startActivity(intent)
+            })
         } catch (_: Exception) {}
     }
 
-    /**
-     * Recursively scans all visible text nodes for:
-     * 1. Blocked keywords (existing behaviour).
-     * 2. Blocked hostnames — catches reader mode / preview mode / offline cache
-     *    where the URL bar doesn't update but the page content is still visible.
-     *    Only runs the hostname check when a known browser package is in the
-     *    foreground to avoid false positives in other apps.
-     */
-    private fun scanForBlockedContent(
-        node: AccessibilityNodeInfo,
-        foregroundPackage: String = ""
-    ): Boolean {
-        if (!node.isVisibleToUser) return false
-
-        val text = node.text?.toString()
-        val desc = node.contentDescription?.toString()
-
-        // Keyword check
-        if (!text.isNullOrEmpty() &&
-            ContentBlockManager.containsBlockedContent(this, text)) return true
-        if (!desc.isNullOrEmpty() &&
-            ContentBlockManager.containsBlockedContent(this, desc)) return true
-
-        // Hostname check — only in browsers and only when cache is populated
-        if (browserPackages.contains(foregroundPackage) &&
-            blockedHostsCache.isNotEmpty()) {
-            val combined = listOfNotNull(text, desc).joinToString(" ").lowercase()
-            if (combined.isNotBlank()) {
-                for (host in blockedHostsCache) {
-                    if (combined.contains(host)) return true
-                }
-            }
-        }
-
-        val childCount = node.childCount
-        for (i in 0 until childCount) {
-            val child = node.getChild(i)
-            if (child != null) {
-                if (scanForBlockedContent(child, foregroundPackage)) return true
-                child.recycle()
-            }
-        }
-        return false
-    }
-
-    /**
-     * Central block dispatcher.
-     *
-     * Soft-blocked apps → SoftBlockActivity (UUID challenge, then access granted).
-     * Hard-blocked apps → BlockedAppActivity (full block with emergency override).
-     *
-     * TemporaryAccessManager is checked first so that a successfully completed
-     * soft-block challenge (or emergency override) is always honoured.
-     */
     private fun performBlock(packageName: String) {
         if (packageName == this.packageName) return
         if (TemporaryAccessManager.isAllowed(packageName)) return
-
         try {
             val currentTime = System.currentTimeMillis()
-            if (lastBlockedPackage == packageName &&
-                currentTime - lastBlockTime < blockCooldownMs) {
+            if (lastBlockedPackage == packageName && currentTime - lastBlockTime < blockCooldownMs) {
                 performGlobalAction(GLOBAL_ACTION_BACK)
                 return
             }
-
             currentlyBlockedApps.add(packageName)
             lastBlockedPackage = packageName
             lastBlockTime = currentTime
@@ -487,12 +537,10 @@ class BlockerAccessibilityService : AccessibilityService() {
             performGlobalAction(GLOBAL_ACTION_HOME)
 
             val isSoft = SoftBlockManager.isSoftBlocked(this, packageName)
-
             serviceScope.launch {
                 delay(50)
                 try {
                     val intent = if (isSoft) {
-                        // Soft block: generate a fresh challenge and send it with the intent
                         val challenge = SoftBlockManager.generateChallenge(this@BlockerAccessibilityService, packageName)
                         Intent(this@BlockerAccessibilityService, SoftBlockActivity::class.java).apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
@@ -500,7 +548,6 @@ class BlockerAccessibilityService : AccessibilityService() {
                             putExtra("challenge_code", challenge)
                         }
                     } else {
-                        // Hard block
                         Intent(this@BlockerAccessibilityService, BlockedAppActivity::class.java).apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
                             putExtra("blocked_package", packageName)
@@ -522,6 +569,7 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        previewClickJob?.cancel()
         serviceScope.cancel()
         isServiceReady = false
         currentlyBlockedApps.clear()
