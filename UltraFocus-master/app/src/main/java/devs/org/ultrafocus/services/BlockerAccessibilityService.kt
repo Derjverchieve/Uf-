@@ -203,7 +203,6 @@ class BlockerAccessibilityService : AccessibilityService() {
                             blockedAppInfos.any { it.packageName == pkg && shouldBlockNow(it) }
                         }
                     if (blockedPkg != null) {
-                        // Kill the blocked app's process so it can't linger in recents
                         try {
                             val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
                             am.killBackgroundProcesses(blockedPkg)
@@ -218,18 +217,14 @@ class BlockerAccessibilityService : AccessibilityService() {
                 if (rootPkg == this.packageName) return
 
                 if (browserPackages.contains(packageName)) {
+                    // URL check (normal pages)
                     if (scanForBlockedUrls(rootNode, packageName)) return
 
-                    val inPageView = isBrowserInPageView(rootNode, packageName)
                     val inPreview = isChromePreview(rootNode, packageName)
 
-                    if ((inPageView || inPreview) &&
-                        scanForBlockedContent(rootNode, packageName, hostnameCheck = true)) {
-                        if (inPreview) {
-                            closePreviewAndExit(packageName)
-                        } else {
-                            performBlock(packageName)
-                        }
+                    // Only scan content for hostnames if we are inside a preview
+                    if (inPreview && scanForBlockedContent(rootNode, packageName, hostnameCheck = true)) {
+                        closePreviewAndExit(packageName)
                         return
                     }
                 } else {
