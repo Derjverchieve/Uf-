@@ -68,7 +68,7 @@ class BlockerAccessibilityService : AccessibilityService() {
     )
     private val previewCloseDescriptions = listOf("close", "dismiss", "exit preview", "x")
 
-    // Packages that must never be scanned for keywords
+    // Packages exempt from keyword scanning
     private val contentScanExemptPackages = setOf(
         "com.android.systemui", "com.android.launcher3",
         "com.google.android.apps.nexuslauncher", "com.transsion.xlauncher",
@@ -154,23 +154,28 @@ class BlockerAccessibilityService : AccessibilityService() {
 
         if (packageName == this.packageName) return
 
-        // ── Preview‑page detection ────────────────────────────────────────
+        // ── Preview‑page detection (immediate text trigger + delayed scan) ──
         if (browserPackages.contains(packageName) &&
             event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
 
             val root = rootInActiveWindow
+
+            // Immediate text check: "Preview page" anywhere → block instantly
             if (root != null && findPreviewTriggerFromNode(root)) {
                 closePreviewAndExit(packageName)
                 return
             }
 
+            // Delayed scan – only if the click actually opened a preview
             previewClickJob?.cancel()
             previewClickJob = serviceScope.launch {
                 delay(200)
                 val delayedRoot = rootInActiveWindow ?: return@launch
-                if (delayedRoot.packageName?.toString() == packageName) {
+                if (delayedRoot.packageName?.toString() == packageName &&
+                    isChromePreview(delayedRoot, packageName)) {
+
                     if (scanForBlockedUrls(delayedRoot, packageName) ||
-                        scanForBlockedContent(delayedRoot, packageName, hostnameCheck = true)) {
+                        isAnyBlockedHostCurrentlyBlockable(delayedRoot)) {
                         closePreviewAndExit(packageName)
                     }
                 }
@@ -188,7 +193,7 @@ class BlockerAccessibilityService : AccessibilityService() {
             if (currentTime - lastScanTime > scanIntervalMs) {
                 lastScanTime = currentTime
 
-                // ── Split‑screen guard: block any blocked app ──────────────
+                // Split‑screen guard
                 val visibleWindows = windows
                 val isRealSplitScreen = !visibleWindows.isNullOrEmpty() &&
                     visibleWindows.any { window ->
@@ -222,8 +227,8 @@ class BlockerAccessibilityService : AccessibilityService() {
 
                     val inPreview = isChromePreview(rootNode, packageName)
 
-                    // Only scan content for hostnames if we are inside a preview
-                    if (inPreview && scanForBlockedContent(rootNode, packageName, hostnameCheck = true)) {
+                    // For previews: schedule‑aware hostname check
+                    if (inPreview && isAnyBlockedHostCurrentlyBlockable(rootNode)) {
                         closePreviewAndExit(packageName)
                         return
                     }
@@ -252,6 +257,48 @@ class BlockerAccessibilityService : AccessibilityService() {
                 performBlock(packageName)
             }
         }
+    }
+
+    // ── Schedule‑aware hostname checker for previews ──────────────────────
+    /**
+     * Recursively scans visible text nodes for blocked hostnames.
+     * For each host found, it checks [WebsiteBlockManager.shouldBlockUrl] with a
+     * synthetic URL. Only returns true if at least one host is currently blockable
+     * (i.e. within its schedule and not temporarily allowed).
+     */
+    private fun isAnyBlockedHostCurrentlyBlockable(rootNode: AccessibilityNodeInfo): Boolean {
+        if (blockedHostsCache.isEmpty()) return false
+        return isAnyBlockedHostRecursive(rootNode, HashSet())
+    }
+
+    private fun isAnyBlockedHostRecursive(node: AccessibilityNodeInfo, visited: MutableSet<Int>): Boolean {
+        if (!node.isVisibleToUser) return false
+        val key = System.identityHashCode(node)
+        if (!visited.add(key)) return false
+
+        val combined = listOfNotNull(
+            node.text?.toString(),
+            node.contentDescription?.toString()
+        ).joinToString(" ").lowercase()
+
+        if (combined.isNotBlank()) {
+            for (host in blockedHostsCache) {
+                if (combined.contains(host) &&
+                    WebsiteBlockManager.shouldBlockUrl(this, "https://$host")) {
+                    return true
+                }
+            }
+        }
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            if (isAnyBlockedHostRecursive(child, visited)) {
+                child.recycle()
+                return true
+            }
+            child.recycle()
+        }
+        return false
     }
 
     // ── Preview close logic ───────────────────────────────────────────────
@@ -329,7 +376,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         return false
     }
 
-    // ── Browser helpers ────────────────────────────────────────────────────
     private fun isBrowserInPageView(rootNode: AccessibilityNodeInfo, packageName: String): Boolean {
         val config = browserConfigs.firstOrNull { it.packageName == packageName } ?: return false
         for (viewId in config.addressBarIds) {
@@ -380,7 +426,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         return null
     }
 
-    // ── URL scanning ───────────────────────────────────────────────────────
     private fun scanForBlockedUrls(rootNode: AccessibilityNodeInfo, packageName: String): Boolean {
         val currentUrl = captureBrowserUrl(rootNode, packageName) ?: return false
 
@@ -431,7 +476,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ── Preview trigger text search ────────────────────────────────────────
     private fun containsPreviewTrigger(text: String): Boolean {
         val norm = text.lowercase()
         return norm.contains("preview page") || norm.contains("open preview") || norm.contains("preview")
@@ -459,7 +503,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         return false
     }
 
-    // ── Content scanning (keywords & hostnames) ────────────────────────────
     private fun scanForBlockedContent(
         node: AccessibilityNodeInfo,
         foregroundPackage: String = "",
@@ -485,7 +528,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         return false
     }
 
-    // ── App blocking helpers ───────────────────────────────────────────────
     private fun shouldBlockNow(appInfo: devs.org.ultrafocus.model.AppInfo): Boolean {
         val timeConfig = appInfo.fromTime
         if (timeConfig.isNullOrEmpty()) return true
