@@ -17,7 +17,6 @@ import devs.org.ultrafocus.database.AppDatabase
 import devs.org.ultrafocus.databinding.ActivitySelectAppBinding
 import devs.org.ultrafocus.model.AppInfo
 import devs.org.ultrafocus.repository.AppRepository
-import devs.org.ultrafocus.utils.StrictModeManager
 import devs.org.ultrafocus.viewModel.MainViewModel
 import devs.org.ultrafocus.viewModel.factory.MainModelFactory
 import kotlinx.coroutines.launch
@@ -56,43 +55,31 @@ class SelectAppActivity : AppCompatActivity() {
         binding.searchView.setOnQueryTextListener(object : SearchView.OnQueryTextListener {
             override fun onQueryTextSubmit(query: String?): Boolean = false
             override fun onQueryTextChange(newText: String?): Boolean {
-                if (::adapter.isInitialized) {
-                    adapter.filter(newText ?: "")
-                }
+                if (::adapter.isInitialized) adapter.filter(newText ?: "")
                 return true
             }
         })
 
         binding.toolbar.setOnMenuItemClickListener { menuItem ->
             if (menuItem.itemId == R.id.done) {
-                if (StrictModeManager.isLocked(this)) {
-                    Toast.makeText(this, "Strict Mode Locked! Changes discarded.", Toast.LENGTH_LONG).show()
-                    finish()
-                    return@setOnMenuItemClickListener true
-                }
-
+                // No global strict mode check — adding apps is always allowed
                 adapter.onItemSelected { apps ->
                     lifecycleScope.launch {
-                        apps.forEach { appInfo ->
-                            viewModel.blockApp(appInfo)
-                        }
+                        apps.forEach { appInfo -> viewModel.blockApp(appInfo) }
                         finish()
                     }
                 }
-                return@setOnMenuItemClickListener true
-            }
-            false
+                true
+            } else false
         }
 
-        binding.swipeLayout.setOnRefreshListener {
-            loadInstalledApps()
-        }
+        binding.swipeLayout.setOnRefreshListener { loadInstalledApps() }
     }
 
     private fun loadInstalledApps() {
-        handler.post{
+        handler.post {
             lifecycleScope.launch {
-                val appList = viewModel.listAllApps(this@SelectAppActivity)
+                val appList    = viewModel.listAllApps(this@SelectAppActivity)
                 val blockedApps = viewModel.getBlockedApps()
                 setAdapter(appList, blockedApps)
             }
@@ -103,15 +90,13 @@ class SelectAppActivity : AppCompatActivity() {
         adapter = SelectAppsAdapter(this, appList, blockedApps)
 
         adapter.setOnAppDeselectedListener { appInfo ->
-            lifecycleScope.launch {
-                viewModel.removeBlockedApp(appInfo)
-            }
+            lifecycleScope.launch { viewModel.removeBlockedApp(appInfo) }
         }
 
         binding.apply {
-            loading.visibility = View.GONE
-            swipeLayout.visibility = View.VISIBLE
-            recyclerView.adapter = adapter
+            loading.visibility      = View.GONE
+            swipeLayout.visibility  = View.VISIBLE
+            recyclerView.adapter    = adapter
             swipeLayout.isRefreshing = false
         }
     }

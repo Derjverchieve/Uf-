@@ -2,15 +2,16 @@ package devs.org.ultrafocus.activities
 
 import android.annotation.SuppressLint
 import android.app.admin.DevicePolicyManager
-import android.content.ComponentName
 import android.content.Context
+import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
-import android.text.InputType
 import android.text.TextUtils
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -23,6 +24,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.appcompat.app.AlertDialog
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import devs.org.ultrafocus.R
 import devs.org.ultrafocus.adapters.SelectedAppsAdapter
@@ -32,19 +34,21 @@ import devs.org.ultrafocus.model.AppInfo
 import devs.org.ultrafocus.repository.AppRepository
 import devs.org.ultrafocus.services.BlockerAccessibilityService
 import devs.org.ultrafocus.services.DeviceAdmin
-import devs.org.ultrafocus.utils.StrictModeManager
-import devs.org.ultrafocus.utils.TypeToAccessDialog
+import devs.org.ultrafocus.services.DownloadBlockService
+import devs.org.ultrafocus.utils.DownloadBlockPrefs
 import devs.org.ultrafocus.viewModel.MainViewModel
 import devs.org.ultrafocus.viewModel.factory.MainModelFactory
 import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var binding : ActivityMainBinding
+    private lateinit var binding: ActivityMainBinding
     private lateinit var viewModel: MainViewModel
     private var handler = Handler(Looper.getMainLooper())
     private var list = mutableListOf<AppInfo>()
     private lateinit var options: ActivityOptionsCompat
+
+    private var ignoreDownloadToggleCallback = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,173 +56,260 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        binding.toolbar.inflateMenu(R.menu.main_toolbar)
+
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
             insets
         }
 
-        options = ActivityOptionsCompat.makeCustomAnimation(this, android.R.anim.fade_in, android.R.anim.fade_out)
+        options = ActivityOptionsCompat.makeCustomAnimation(
+            this, android.R.anim.fade_in, android.R.anim.fade_out
+        )
+
         val database = AppDatabase.getDatabase(this)
         val repository = AppRepository(database)
         val factory = MainModelFactory(repository)
         viewModel = factory.create(MainViewModel::class.java)
 
-        // Check Overlay Permission (Required for the Block Screen to show up over other apps)
-        checkOverlayPermission()
-
         clickListeners()
         loadSelectedApps()
         updateFocusSwitchState()
+        updateDownloadBlockSwitchState()
+        updateDownloadStrictState()
     }
 
     override fun onResume() {
         super.onResume()
         loadSelectedApps()
         updateFocusSwitchState()
+        updateDownloadBlockSwitchState()
+        updateDownloadStrictState()
     }
 
-    private fun checkOverlayPermission() {
-        if (!Settings.canDrawOverlays(this)) {
-            // Optional: Only force this if you really want to nag the user
-            // val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-            // startActivity(intent)
-        }
-    }
+    // ── State sync ────────────────────────────────────────────────────────────
 
     private fun updateFocusSwitchState() {
         binding.focusSwitch.isChecked = isAccessibilityServiceEnabled()
     }
 
-    private fun isAccessibilityServiceEnabled(): Boolean {
-        val expectedComponent = "${packageName}/devs.org.ultrafocus.services.BlockerAccessibilityService"
-        val enabledServices = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
-        return !TextUtils.isEmpty(enabledServices) && enabledServices.split(":").any { it.equals(expectedComponent, ignoreCase = true) }
+    private fun updateDownloadBlockSwitchState() {
+        ignoreDownloadToggleCallback = true
+        binding.downloadBlockSwitch.isChecked = DownloadBlockPrefs.isEnabled(this)
+        ignoreDownloadToggleCallback = false
     }
 
-    private fun openAccessibilityServiceScreen(cls: Class<*>) {
-        try {
-            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-            val componentName = ComponentName(this, cls)
-            intent.putExtra(":settings:fragment_args_key", componentName.flattenToString())
-            val bundle = Bundle()
-            bundle.putString(":settings:fragment_args_key", componentName.flattenToString())
-            intent.putExtra(":settings:show_fragment_args", bundle)
-            startActivity(intent, options.toBundle())
-        } catch (e: Exception) {
-            e.printStackTrace()
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-        }
+    private fun updateDownloadStrictState() {
+        // FIX: update both the status text AND the button label so users
+        // can see strict mode state without opening the dialog.
+        binding.txtDownloadStrictStatus.text = DownloadBlockPrefs.getStatusText(this)
+        binding.btnDownloadStrict.text = DownloadBlockPrefs.getStrictButtonLabel(this)
     }
 
-    private fun loadSelectedApps() {
-        handler.post {
-            lifecycleScope.launch {
-                list.clear()
-                list = viewModel.getBlockedApps()
-                setAdapter()
-            }
-        }
-    }
-
-    @SuppressLint("NotifyDataSetChanged")
-    private fun setAdapter() {
-        val adapter = SelectedAppsAdapter(this, list)
-        binding.recyclerView.layoutManager = LinearLayoutManager(this)
-        binding.recyclerView.adapter = adapter
-
-        // Remove App Logic (Protected by Strict Mode)
-        adapter.setOnItemRemovedListener { appInfo ->
-            if (StrictModeManager.isLocked(this)) {
-                Toast.makeText(this, "Strict Mode Locked! Request unlock first.", Toast.LENGTH_SHORT).show()
-                loadSelectedApps() // Reset list visually
-                return@setOnItemRemovedListener
-            }
-            lifecycleScope.launch {
-                if (appInfo != null) viewModel.removeBlockedApp(appInfo)
-            }
-        }
-
-        // Time Schedule Logic (Protected by Strict Mode)
-        adapter.setOnSetTimePeriodListener { appInfo ->
-            showTimePeriodDialogForApp(appInfo)
-        }
-    }
+    // ── Click listeners ───────────────────────────────────────────────────────
 
     private fun clickListeners() {
-        // Normal Click: Select App
+
         binding.btnAddApps.setOnClickListener {
             startActivity(Intent(this, SelectAppActivity::class.java))
         }
-
-        // Long Click: Advanced Blocker (Specific Screens / Keywords / Websites)
         binding.btnAddApps.setOnLongClickListener {
-            val intent = Intent(this, SpecificBlockerActivity::class.java)
-            startActivity(intent)
+            startActivity(Intent(this, SpecificBlockerActivity::class.java))
             true
+        }
+
+        binding.btnOpenDeepWork.setOnClickListener {
+            startActivity(Intent(this, DeepWorkSessionActivity::class.java))
         }
 
         binding.focusSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked) {
-                if (!isAccessibilityServiceEnabled()) {
-                    showMaterialDialog()
-                }
+                if (!isAccessibilityServiceEnabled()) showMaterialDialog()
             } else {
-                Toast.makeText(this, "To disable, turn off UltraFocus in Accessibility Settings.", Toast.LENGTH_LONG).show()
+                Toast.makeText(
+                    this,
+                    "To disable, turn off UltraFocus in Accessibility Settings.",
+                    Toast.LENGTH_LONG
+                ).show()
                 binding.focusSwitch.isChecked = isAccessibilityServiceEnabled()
             }
         }
-
-        // Long Click Focus Switch: ENABLE DEVICE ADMIN (Anti-Uninstall)
         binding.focusSwitch.setOnLongClickListener {
             askForDeviceAdmin()
             true
         }
 
-        binding.btnAddTimePeriod.setOnClickListener {
-            showGlobalTimeDialog()
+        binding.downloadBlockSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (ignoreDownloadToggleCallback) return@setOnCheckedChangeListener
+            handleDownloadBlockToggle(isChecked)
         }
 
-        // Long Click Time Button: STRICT MODE MANAGER
-        binding.btnAddTimePeriod.setOnLongClickListener {
-            showStrictModeDialog()
-            true
+        binding.btnDownloadStrict.setOnClickListener {
+            showDownloadStrictModeDialog()
+        }
+
+        binding.toolbar.setOnMenuItemClickListener { menuItem ->
+            when (menuItem.itemId) {
+                R.id.done -> {
+                    showSettingsDialog()
+                    true
+                }
+                R.id.debug_capture -> {
+                    startActivity(Intent(this, DebugCaptureActivity::class.java))
+                    true
+                }
+                else -> false
+            }
         }
     }
 
-    // --- DIALOGS & LOGIC ---
+    // ── Download blocking ─────────────────────────────────────────────────────
 
-    private fun showGlobalTimeDialog() {
-        if (StrictModeManager.isLocked(this)) {
-            Toast.makeText(this, "Strict Mode Locked!", Toast.LENGTH_SHORT).show()
+    private fun handleDownloadBlockToggle(enable: Boolean) {
+        if (!enable && DownloadBlockPrefs.isLocked(this)) {
+            Toast.makeText(
+                this,
+                "Download blocking is locked by strict mode.",
+                Toast.LENGTH_SHORT
+            ).show()
+            ignoreDownloadToggleCallback = true
+            binding.downloadBlockSwitch.isChecked = true
+            ignoreDownloadToggleCallback = false
             return
         }
 
-        val input = EditText(this)
-        input.hint = "09:00-12:00, 14:00-18:00"
-
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Global Schedule")
-            .setMessage("Enter time ranges separated by commas.\nExample: 09:00-12:00,14:30-20:00")
-            .setView(input)
-            .setPositiveButton("Save All") { _, _ ->
-                val newConfig = input.text.toString()
-                lifecycleScope.launch {
-                    viewModel.updateBlockedAppsTimePeriod(newConfig, null, "DAILY")
-                    Toast.makeText(this@MainActivity, "Updated all apps!", Toast.LENGTH_SHORT).show()
-                    loadSelectedApps()
-                }
+        if (enable) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                !Environment.isExternalStorageManager()
+            ) {
+                ignoreDownloadToggleCallback = true
+                binding.downloadBlockSwitch.isChecked = false
+                ignoreDownloadToggleCallback = false
+                showDownloadPermissionDialog()
+                return
             }
+            startDownloadBlockService()
+        } else {
+            stopDownloadBlockService()
+        }
+
+        updateDownloadStrictState()
+    }
+
+    private fun startDownloadBlockService() {
+        DownloadBlockPrefs.setEnabled(this, true)
+        val intent = Intent(this, DownloadBlockService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+        Toast.makeText(this, "Download blocking enabled.", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun stopDownloadBlockService() {
+        DownloadBlockPrefs.setEnabled(this, false)
+        stopService(Intent(this, DownloadBlockService::class.java))
+        Toast.makeText(this, "Download blocking disabled.", Toast.LENGTH_SHORT).show()
+    }
+
+    // ── Dialogs ───────────────────────────────────────────────────────────────
+
+    private fun showDownloadPermissionDialog() {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("All Files Access Required")
+            .setMessage(
+                "Download blocking needs \"All Files Access\" permission to watch " +
+                    "and delete files in the Downloads folder.\n\n" +
+                    "Tap Grant to open the permission screen, then enable it for UltraFocus."
+            )
+            .setPositiveButton("Grant") { _, _ -> grantAllFilesAccess() }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun showTimePeriodDialogForApp(appInfo: AppInfo) {
-        if (StrictModeManager.isLocked(this)) {
-            Toast.makeText(this, "Strict Mode Locked!", Toast.LENGTH_SHORT).show()
-            return
+    private fun showDownloadStrictModeDialog() {
+        val key = "download_block"
+        val isLocked = DownloadBlockPrefs.isLocked(this)
+        val currentHours = DownloadBlockPrefs.getStrictHours(this)
+        val prefs = getSharedPreferences("download_block_prefs", Context.MODE_PRIVATE)
+        val reqTime = prefs.getLong("strict_req", 0L)
+
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(60, 40, 60, 10)
         }
 
+        val statusText = TextView(this).apply {
+            textAlignment = android.view.View.TEXT_ALIGNMENT_CENTER
+            textSize = 15f
+            setPadding(0, 0, 0, 20)
+            text = DownloadBlockPrefs.getStatusText(this@MainActivity)
+        }
+        layout.addView(statusText)
+
+        // Countdown ticker
+        val h = Handler(Looper.getMainLooper())
+        val r = object : Runnable {
+            override fun run() {
+                statusText.text = DownloadBlockPrefs.getStatusText(this@MainActivity)
+                if (DownloadBlockPrefs.isLocked(this@MainActivity)) h.postDelayed(this, 1000)
+            }
+        }
+        h.post(r)
+
+        val builder = AlertDialog.Builder(this).setTitle("Download Strict Mode")
+
+        if (isLocked) {
+            // Locked state — show unlock flow, no input field
+            builder.setView(layout)
+            when {
+                reqTime == 0L -> builder.setPositiveButton("Request Unlock") { _, _ ->
+                    DownloadBlockPrefs.requestUnlock(this)
+                    updateDownloadStrictState()
+                    Toast.makeText(this, "Unlock timer started!", Toast.LENGTH_SHORT).show()
+                }
+                DownloadBlockPrefs.isLocked(this) -> builder.setNegativeButton("Cancel Request") { _, _ ->
+                    DownloadBlockPrefs.cancelRequest(this)
+                    updateDownloadStrictState()
+                    Toast.makeText(this, "Request cancelled.", Toast.LENGTH_SHORT).show()
+                }
+                else -> builder.setPositiveButton("Disable Now") { _, _ ->
+                    DownloadBlockPrefs.clearStrictMode(this)
+                    updateDownloadStrictState()
+                }
+            }
+        } else {
+            // Not locked — show hours input
+            val hoursInput = EditText(this).apply {
+                hint = "Hours delay (e.g. 24). Set 0 to disable."
+                inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                if (currentHours > 0) setText(currentHours.toString())
+            }
+            layout.addView(TextView(this).apply { text = "Lock duration (hours):" })
+            layout.addView(hoursInput)
+            builder.setView(layout)
+            builder.setPositiveButton("Save") { _, _ ->
+                val hours = hoursInput.text.toString().toIntOrNull() ?: 0
+                if (hours <= 0) {
+                    DownloadBlockPrefs.clearStrictMode(this)
+                    Toast.makeText(this, "Download strict mode disabled.", Toast.LENGTH_SHORT).show()
+                } else {
+                    DownloadBlockPrefs.setStrictMode(this, hours)
+                    Toast.makeText(this, "Strict mode set: ${hours}h lock on download blocking.", Toast.LENGTH_SHORT).show()
+                }
+                updateDownloadStrictState()
+            }
+        }
+
+        builder.setNegativeButton("Close", null)
+        val dialog = builder.create()
+        dialog.setOnDismissListener { h.removeCallbacks(r) }
+        dialog.show()
+    }
+
+    private fun showTimePeriodDialogForApp(appInfo: AppInfo) {
         val input = EditText(this)
         input.hint = "09:00-12:00, 14:00-18:00"
         input.setText(appInfo.fromTime)
@@ -238,103 +329,144 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun showStrictModeDialog() {
-        val isLocked = StrictModeManager.isLocked(this)
-        val isEnabled = StrictModeManager.isStrictModeEnabled(this)
-        val requestTime = getSharedPreferences("StrictModePrefs", Context.MODE_PRIVATE).getLong("request_timestamp", 0)
+    private fun showSettingsDialog() {
+        val items = arrayOf(
+            "Grant All Files Access",
+            "Grant Draw Over Other Apps",
+            "Enable Device Admin (Anti-Uninstall)"
+        )
 
-        val builder = MaterialAlertDialogBuilder(this)
-        builder.setTitle("Strict Mode Manager")
-
-        val statusText = TextView(this)
-        statusText.textAlignment = android.view.View.TEXT_ALIGNMENT_CENTER
-        statusText.textSize = 18f
-        statusText.setPadding(40, 40, 40, 40)
-        statusText.text = StrictModeManager.getStatusText(this)
-
-        // Live Timer Logic
-        val timerHandler = Handler(Looper.getMainLooper())
-        val timerRunnable = object : Runnable {
-            override fun run() {
-                if (StrictModeManager.isStrictModeEnabled(this@MainActivity)) {
-                    statusText.text = StrictModeManager.getStatusText(this@MainActivity)
-                    timerHandler.postDelayed(this, 1000)
+        MaterialAlertDialogBuilder(this)
+            .setTitle("UltraFocus Permissions")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> grantAllFilesAccess()
+                    1 -> grantDrawOverlayPermission()
+                    2 -> askForDeviceAdmin()
                 }
             }
-        }
-        timerHandler.post(timerRunnable)
+            .setNegativeButton("Close", null)
+            .show()
+    }
 
-        if (!isEnabled) {
-            // SETUP MODE
-            val input = EditText(this)
-            input.hint = "Enter hours (e.g. 24, 48)"
-            input.inputType = InputType.TYPE_CLASS_NUMBER
+    // ── Permissions ───────────────────────────────────────────────────────────
 
-            val container = LinearLayout(this)
-            container.orientation = LinearLayout.VERTICAL
-            container.addView(statusText)
-            container.addView(input)
-            builder.setView(container)
-
-            builder.setPositiveButton("Enable Lock") { _, _ ->
-                val hours = input.text.toString().toIntOrNull() ?: 24
-                StrictModeManager.setStrictMode(this, true, hours)
-                Toast.makeText(this, "Locked for $hours hours", Toast.LENGTH_SHORT).show()
-                timerHandler.removeCallbacks(timerRunnable)
+    private fun grantAllFilesAccess() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (Environment.isExternalStorageManager()) {
+                Toast.makeText(this, "All Files Access already granted.", Toast.LENGTH_SHORT).show()
+            } else {
+                try {
+                    startActivity(
+                        Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                            data = Uri.parse("package:$packageName")
+                        }
+                    )
+                } catch (_: Exception) {
+                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                }
             }
         } else {
-            // ACTIVE MODE
-            builder.setView(statusText)
-            if (isLocked) {
-                if (requestTime == 0L) {
-                    // IDLE: Waiting for request
-                    builder.setPositiveButton("Request Unlock") { _, _ ->
-                        TypeToAccessDialog.show(this, "Security Verification") {
-                            StrictModeManager.requestUnlock(this)
-                            Toast.makeText(this, "Timer Started!", Toast.LENGTH_LONG).show()
-                        }
-                    }
-                } else {
-                    // TIMER RUNNING
-                    builder.setNegativeButton("Cancel Request") { _, _ ->
-                        StrictModeManager.cancelRequest(this)
-                        Toast.makeText(this, "Request Cancelled", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            } else {
-                // UNLOCKED (Timer finished)
-                builder.setPositiveButton("Disable Strict Mode") { _, _ ->
-                    TypeToAccessDialog.show(this, "Security Verification") {
-                        StrictModeManager.setStrictMode(this, false, 0)
-                        Toast.makeText(this, "Disabled", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
+            Toast.makeText(
+                this,
+                "All Files Access not required on Android 10 and below.",
+                Toast.LENGTH_SHORT
+            ).show()
         }
+    }
 
-        val dialog = builder.create()
-        dialog.setOnDismissListener {
-            timerHandler.removeCallbacks(timerRunnable)
+    private fun grantDrawOverlayPermission() {
+        if (!Settings.canDrawOverlays(this)) {
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+            )
+        } else {
+            Toast.makeText(this, "Draw Over Other Apps already granted.", Toast.LENGTH_SHORT).show()
         }
-        dialog.show()
     }
 
     private fun askForDeviceAdmin() {
         val componentName = ComponentName(this, DeviceAdmin::class.java)
-        val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
-        intent.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, componentName)
-        intent.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Prevents uninstallation while blocking.")
-        startActivity(intent)
+        startActivity(
+            Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, componentName)
+                putExtra(
+                    DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                    "Prevents uninstallation while blocking."
+                )
+            }
+        )
     }
 
     private fun showMaterialDialog() {
         MaterialAlertDialogBuilder(this)
             .setTitle(getString(R.string.enable_accessibility_service))
             .setMessage(getString(R.string.permission_message))
-            .setPositiveButton(getString(R.string.grant)){ _, _->
+            .setPositiveButton(getString(R.string.grant)) { _, _ ->
                 openAccessibilityServiceScreen(BlockerAccessibilityService::class.java)
             }
-            .setNegativeButton(getString(R.string.cancel)){ dialog, _ ->null}
+            .setNegativeButton(getString(R.string.cancel)) { _, _ -> }
             .create().show()
     }
+
+    // ── Accessibility helpers ─────────────────────────────────────────────────
+
+    private fun isAccessibilityServiceEnabled(): Boolean {
+        val expectedComponent =
+            "${packageName}/devs.org.ultrafocus.services.BlockerAccessibilityService"
+        val enabledServices = Settings.Secure.getString(
+            contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        )
+        return !TextUtils.isEmpty(enabledServices) &&
+            enabledServices.split(":").any {
+                it.equals(expectedComponent, ignoreCase = true)
+            }
+    }
+
+    private fun openAccessibilityServiceScreen(cls: Class<*>) {
+        try {
+            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            val componentName = ComponentName(this, cls)
+            intent.putExtra(":settings:fragment_args_key", componentName.flattenToString())
+            val bundle = Bundle()
+            bundle.putString(":settings:fragment_args_key", componentName.flattenToString())
+            intent.putExtra(":settings:show_fragment_args", bundle)
+            startActivity(intent, options.toBundle())
+        } catch (_: Exception) {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+    }
+
+    // ── RecyclerView ──────────────────────────────────────────────────────────
+
+    private fun loadSelectedApps() {
+        handler.post {
+            lifecycleScope.launch {
+                list.clear()
+                list = viewModel.getBlockedApps()
+                setAdapter()
+            }
+        }
+    }
+
+    @SuppressLint("NotifyDataSetChanged")
+    private fun setAdapter() {
+        val adapter = SelectedAppsAdapter(this, list)
+        binding.recyclerView.layoutManager = LinearLayoutManager(this)
+        binding.recyclerView.adapter = adapter
+
+        adapter.setOnItemRemovedListener { appInfo ->
+            lifecycleScope.launch {
+                if (appInfo != null) viewModel.removeBlockedApp(appInfo)
+            }
+        }
+
+        adapter.setOnSetTimePeriodListener { appInfo ->
+            showTimePeriodDialogForApp(appInfo)
+        }
+    }
 }
+

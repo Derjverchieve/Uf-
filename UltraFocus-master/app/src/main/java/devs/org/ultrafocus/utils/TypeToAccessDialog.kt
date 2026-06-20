@@ -2,6 +2,7 @@ package devs.org.ultrafocus.utils
 
 import android.app.AlertDialog
 import android.content.Context
+import android.text.InputFilter
 import android.text.InputType
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -12,35 +13,35 @@ import java.util.UUID
 
 object TypeToAccessDialog {
 
+    // Max characters the challenge code can be (user must TYPE this, no paste)
+    private const val MAX_CODE_CHARS = 16
+
     fun show(context: Context, title: String, onUnlockingSuccess: () -> Unit) {
-        val requiredLength = PunishmentManager.getChallengeLength(context)
         val level = PunishmentManager.getCurrentLevel(context)
 
-        // Generate raw string
+        // Generate challenge code, capped at MAX_CODE_CHARS (16)
+        val rawLength = minOf(PunishmentManager.getChallengeLength(context), MAX_CODE_CHARS)
         var rawCode = ""
-        while (rawCode.length < requiredLength) {
+        while (rawCode.length < rawLength) {
             rawCode += UUID.randomUUID().toString().replace("-", "")
         }
-        rawCode = rawCode.take(requiredLength)
+        rawCode = rawCode.take(rawLength)
 
-        // Add hyphens for "readability" (groups of 8)
-        // This makes it look like a serial key: A1B2C3D4-E5F6G7H8...
+        // Format with hyphens every 8 chars: "XXXXXXXX-XXXXXXXX"
         val formattedCode = rawCode.chunked(8).joinToString("-")
 
         val builder = AlertDialog.Builder(context)
         builder.setTitle("$title (Level $level)")
         builder.setCancelable(false)
 
-        // 1. SCROLL VIEW WRAPPER (Fixes the 512 char overflow issue)
         val scrollView = ScrollView(context)
-
         val layout = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 40, 50, 10)
         }
 
         val instructions = TextView(context).apply {
-            text = "Penalty Level $level\nType the code EXACTLY as shown (including dashes):"
+            text = "Penalty Level $level\nType the code EXACTLY as shown (including dashes).\nPasting is disabled — you must type it manually."
             textSize = 14f
         }
 
@@ -48,31 +49,39 @@ object TypeToAccessDialog {
             text = formattedCode
             textSize = 16f
             setPadding(0, 20, 0, 20)
-            setTypeface(android.graphics.Typeface.MONOSPACE)
-
-            // 2. DISABLE COPYING
+            typeface = android.graphics.Typeface.MONOSPACE
             setTextIsSelectable(false)
             isLongClickable = false
         }
 
-        val input = EditText(context).apply {
+        // FIX: Custom EditText that blocks all paste operations
+        val input = object : EditText(context) {
+            override fun onTextContextMenuItem(id: Int): Boolean {
+                // Intercept paste — return false to consume without acting
+                if (id == android.R.id.paste || id == android.R.id.pasteAsPlainText) {
+                    Toast.makeText(context, "Pasting is disabled. Type the code manually.", Toast.LENGTH_SHORT).show()
+                    return false
+                }
+                return super.onTextContextMenuItem(id)
+            }
+        }.apply {
             hint = "Type the code here..."
-            // Visible Password type usually disables auto-correct/suggestions
             inputType = InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            // Prevent long-press context menu from appearing at all
+            isLongClickable = false
+            // Hard length limit = formattedCode.length (includes dashes)
+            filters = arrayOf(InputFilter.LengthFilter(formattedCode.length))
         }
 
         layout.addView(instructions)
         layout.addView(codeView)
         layout.addView(input)
-
         scrollView.addView(layout)
         builder.setView(scrollView)
 
         builder.setPositiveButton("Verify") { _, _ ->
-            // Check against formatted code (user must type hyphens)
             if (input.text.toString().trim() == formattedCode) {
                 PunishmentManager.incrementLevel(context)
-
                 if (AccountabilityManager.hasPartner(context)) {
                     Toast.makeText(context, "Verifying via WhatsApp...", Toast.LENGTH_LONG).show()
                     AccountabilityManager.triggerShameProtocol(context)

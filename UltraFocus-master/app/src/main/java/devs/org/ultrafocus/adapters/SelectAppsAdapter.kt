@@ -8,6 +8,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
 import devs.org.ultrafocus.databinding.SelectAppsItemBinding
 import devs.org.ultrafocus.model.AppInfo
+import devs.org.ultrafocus.utils.ItemStrictModeManager
 import devs.org.ultrafocus.utils.StrictModeManager
 
 class SelectAppsAdapter(
@@ -81,6 +82,18 @@ class SelectAppsAdapter(
                                 selectedAppsList.add(appInfo)
                             }
                         } else {
+                            // Per-app strict mode lock: prevent deselection if this specific
+                            // app has an active strict mode lock. The user must go through the
+                            // unlock flow in the main list instead.
+                            if (ItemStrictModeManager.isLocked(context, appInfo.packageName)) {
+                                binding.checkbox.isChecked = true
+                                Toast.makeText(
+                                    context,
+                                    "${appInfo.appName} is locked by strict mode and cannot be removed.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                return@setOnClickListener
+                            }
                             selectedAppsList.removeAll { it.packageName == appInfo.packageName }
                             onAppDeselected?.invoke(appInfo)
                         }
