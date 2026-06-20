@@ -98,6 +98,12 @@ object DeepWorkSessionManager {
     private var tickerJob: Job? = null
     private var tickCount = 0
     private var screenReceiver: BroadcastReceiver? = null
+    private var targetReachedFired = false
+
+    // Set by DeepWorkSessionService so it can fire an alert (sound/vibration/
+    // notification) the moment the target is hit — kept out of the Manager
+    // itself since that's an Android-specific concern, not session logic.
+    var onTargetReached: (() -> Unit)? = null
 
     @Synchronized
     fun init(context: Context) {
@@ -192,6 +198,7 @@ object DeepWorkSessionManager {
             lastFocusStartTimestamp = now
             graceJob?.cancel(); graceJob = null
             tickCount = 0
+            targetReachedFired = false
             // Best guess at "where we are right now" — almost always our own
             // app, since the user is looking at the Start button. See the
             // class doc: this flows through the exact same evaluateForeground
@@ -487,6 +494,11 @@ object DeepWorkSessionManager {
         else session.pauseTimeMs
 
         _state.value = _state.value.copy(focusedTimeMs = liveFocused, pauseTimeMs = livePause)
+
+        if (!targetReachedFired && session.targetDurationMs > 0 && liveFocused >= session.targetDurationMs) {
+            targetReachedFired = true
+            onTargetReached?.invoke()
+        }
 
         tickCount++
         if (phase == SessionPhase.RUNNING && tickCount % CHECKPOINT_INTERVAL_TICKS == 0) {

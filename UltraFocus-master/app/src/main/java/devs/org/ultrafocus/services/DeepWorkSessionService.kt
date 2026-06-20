@@ -7,6 +7,9 @@ import android.app.Service
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import androidx.core.app.NotificationCompat
 import devs.org.ultrafocus.R
 import devs.org.ultrafocus.activities.DeepWorkSessionActivity
@@ -36,10 +39,18 @@ class DeepWorkSessionService : Service() {
         const val ACTION_END = "devs.org.ultrafocus.action.SESSION_END"
         private const val CHANNEL_ID = "UltraFocusDeepWork"
         private const val NOTIFICATION_ID = 1010
+        private const val TARGET_CHANNEL_ID = "UltraFocusTargetReached"
+        private const val TARGET_NOTIFICATION_ID = 1011
+        private val ALARM_PATTERN = longArrayOf(0, 400, 200, 400, 200, 400)
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var observeJob: Job? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        DeepWorkSessionManager.onTargetReached = { fireTargetReachedAlert() }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -70,10 +81,22 @@ class DeepWorkSessionService : Service() {
 
     private fun createChannelIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID, "Deep Work Session", NotificationManager.IMPORTANCE_LOW
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, "Deep Work Session", NotificationManager.IMPORTANCE_LOW)
             )
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+            // Separate, high-importance channel just for the target-reached
+            // alert — the ongoing session channel is deliberately LOW
+            // importance (silent, no heads-up) so it doesn't interrupt you
+            // every time the notification updates; this one is the opposite,
+            // on purpose, since this is the one moment it should grab you.
+            val targetChannel = NotificationChannel(
+                TARGET_CHANNEL_ID, "Focus Target Reached", NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                enableVibration(true)
+                vibrationPattern = ALARM_PATTERN
+            }
+            nm.createNotificationChannel(targetChannel)
         }
     }
 
@@ -153,6 +176,48 @@ class DeepWorkSessionService : Service() {
         return builder.build()
     }
 
+    private fun fireTargetReachedAlert() {
+        val state = DeepWorkSessionManager.state.value
+        val targetStr = DurationFormatter.formatCompact(state.targetDurationMs)
+        val openIntent = PendingIntent.getActivity(
+            this, 2,
+            Intent(this, DeepWorkSessionActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(this, TARGET_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Target reached — $targetStr")
+            .setContentText("${state.primaryAppName ?: "Session"} · keep going or wrap up from here.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setAutoCancel(true)
+            .setContentIntent(openIntent)
+            .build()
+        notificationManager().notify(TARGET_NOTIFICATION_ID, notification)
+        vibrate()
+    }
+
+    private fun vibrate() {
+        try {
+            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                (getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(VIBRATOR_SERVICE) as Vibrator
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createWaveform(ALARM_PATTERN, -1))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(ALARM_PATTERN, -1)
+            }
+        } catch (_: Exception) {
+            // Vibration is a nice-to-have on top of the notification itself
+            // (which already carries sound) — not worth crashing over.
+        }
+    }
+
     private fun actionPendingIntent(action: String): PendingIntent {
         val intent = Intent(this, DeepWorkSessionService::class.java).setAction(action)
         return PendingIntent.getService(
@@ -163,6 +228,7 @@ class DeepWorkSessionService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        DeepWorkSessionManager.onTargetReached = null
         observeJob?.cancel()
         serviceScope.cancel()
     }
