@@ -256,10 +256,16 @@ class DeepWorkSessionActivity : AppCompatActivity() {
                     }
                 }
 
-                binding.txtLiveTimer.text = DurationFormatter.formatClock(state.focusedTimeMs)
-                val targetMin = TimeUnit.MILLISECONDS.toMinutes(state.targetDurationMs)
+                val remaining = state.targetDurationMs - state.focusedTimeMs
+                if (remaining >= 0) {
+                    binding.txtLiveTimer.text = DurationFormatter.formatClock(remaining)
+                    binding.txtLiveTimer.setTextColor(getColor(devs.org.ultrafocus.R.color.text_primary))
+                } else {
+                    binding.txtLiveTimer.text = "+" + DurationFormatter.formatClock(-remaining)
+                    binding.txtLiveTimer.setTextColor(getColor(devs.org.ultrafocus.R.color.soft_block_amber))
+                }
                 binding.txtLiveSub.text =
-                    "Target ${targetMin}m · ${state.pauseCount} pause${if (state.pauseCount == 1) "" else "s"}" +
+                    "${DurationFormatter.formatCompact(state.focusedTimeMs)} focused · ${state.pauseCount} pause${if (state.pauseCount == 1) "" else "s"}" +
                     if (state.pauseTimeMs > 0) " · ${DurationFormatter.formatCompact(state.pauseTimeMs)} paused" else ""
 
                 if (state.sessionId != null) observeLivePauseLog(state.sessionId)
