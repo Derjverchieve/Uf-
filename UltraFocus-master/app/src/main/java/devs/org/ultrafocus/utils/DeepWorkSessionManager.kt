@@ -62,7 +62,7 @@ import kotlinx.coroutines.launch
  */
 object DeepWorkSessionManager {
 
-    private const val GRACE_PERIOD_MS = 5_000L
+    private const val GRACE_PERIOD_MS = 10_000L
     private const val CHECKPOINT_INTERVAL_TICKS = 30 // checkpoint to DB roughly every ~30s while running
     // Opening this screen to check on your session shouldn't itself count as
     // leaving the work app — otherwise checking the status is the one thing
@@ -141,7 +141,7 @@ object DeepWorkSessionManager {
         // accessibility service reports it), not just the screen turning on.
         graceJob?.cancel(); graceJob = null
         lastSeenForegroundPackage = null
-        openNewPause(System.currentTimeMillis(), PauseReason.APP_SWITCH, appPackage = null, appName = "Screen off", isNewBreak = true)
+        openNewPause(System.currentTimeMillis(), PauseReason.APP_SWITCH, appPackage = null, appName = "Screen off")
     }
 
     fun hasActiveSession(): Boolean = _state.value.phase != SessionPhase.IDLE
@@ -223,13 +223,13 @@ object DeepWorkSessionManager {
         if (_state.value.phase != SessionPhase.RUNNING) return
         currentSession ?: return
         graceJob?.cancel(); graceJob = null
-        openNewPause(System.currentTimeMillis(), PauseReason.MANUAL, appPackage = null, appName = null, isNewBreak = true)
+        openNewPause(System.currentTimeMillis(), PauseReason.MANUAL, appPackage = null, appName = null)
     }
 
     fun resumeManually() {
         if (_state.value.phase != SessionPhase.PAUSED) return
         if (openPauseEvent?.reason != PauseReason.MANUAL) return
-        closeCurrentPause(System.currentTimeMillis(), resumeFocus = true)
+        closeCurrentPause(System.currentTimeMillis())
     }
 
     fun completeSession() = finalizeSession(SessionStatus.COMPLETED)
@@ -271,7 +271,7 @@ object DeepWorkSessionManager {
         if (packageName == session.primaryAppPackage) {
             graceJob?.cancel(); graceJob = null
             if (phase == SessionPhase.PAUSED) {
-                closeCurrentPause(now, resumeFocus = true)
+                closeCurrentPause(now)
             }
             return
         }
@@ -279,14 +279,16 @@ object DeepWorkSessionManager {
         when (phase) {
             SessionPhase.RUNNING -> {
                 if (graceJob == null) {
-                    val awayStart = now
                     graceJob = managerScope.launch {
                         delay(GRACE_PERIOD_MS)
                         graceJob = null
                         val stillAway = lastSeenForegroundPackage != session.primaryAppPackage
                         if (stillAway) {
                             val pkg = lastSeenForegroundPackage ?: packageName
-                            openNewPause(awayStart, PauseReason.APP_SWITCH, pkg, resolveAppName(pkg), isNewBreak = true)
+                            // Pause starts now — i.e. the grace period itself
+                            // is forgiven and counts as continued focus, not
+                            // as part of the pause.
+                            openNewPause(System.currentTimeMillis(), PauseReason.APP_SWITCH, pkg, resolveAppName(pkg))
                         }
                     }
                 }
@@ -296,8 +298,7 @@ object DeepWorkSessionManager {
             SessionPhase.PAUSED -> {
                 val open = openPauseEvent
                 if (open?.reason != PauseReason.MANUAL && open?.appPackage != packageName) {
-                    closeCurrentPause(now, resumeFocus = false)
-                    openNewPause(now, PauseReason.APP_SWITCH, packageName, resolveAppName(packageName), isNewBreak = false)
+                    switchPauseApp(now, packageName, resolveAppName(packageName))
                 }
             }
             SessionPhase.IDLE -> {}
@@ -308,23 +309,19 @@ object DeepWorkSessionManager {
     // Each of these mutates in-memory state synchronously (so the UI updates
     // instantly) and then fires off the Room write in a child coroutine.
 
-    private fun openNewPause(
-        startTime: Long,
-        reason: PauseReason,
-        appPackage: String?,
-        appName: String?,
-        isNewBreak: Boolean
-    ) {
+    // Always represents a genuine RUNNING → PAUSED transition (the one other
+    // case — switching between two non-work apps while already paused — goes
+    // through switchPauseApp below instead, which doesn't touch focus time
+    // or pauseCount at all).
+    private fun openNewPause(startTime: Long, reason: PauseReason, appPackage: String?, appName: String?) {
         val session = currentSession ?: return
 
-        if (isNewBreak) {
-            val focusedDelta = (startTime - lastFocusStartTimestamp).coerceAtLeast(0)
-            currentSession = session.copy(
-                focusedTimeMs = session.focusedTimeMs + focusedDelta,
-                pauseCount = session.pauseCount + 1,
-                updatedAt = System.currentTimeMillis()
-            )
-        }
+        val focusedDelta = (startTime - lastFocusStartTimestamp).coerceAtLeast(0)
+        currentSession = session.copy(
+            focusedTimeMs = session.focusedTimeMs + focusedDelta,
+            pauseCount = session.pauseCount + 1,
+            updatedAt = System.currentTimeMillis()
+        )
 
         val event = PauseEvent(
             sessionId = session.id,
@@ -354,7 +351,52 @@ object DeepWorkSessionManager {
         }
     }
 
-    private fun closeCurrentPause(now: Long, resumeFocus: Boolean) {
+    // Switching between two different non-work apps while already paused —
+    // e.g. launcher to a different app to System UI. Closes the old pause
+    // row and opens a new one for the new app, in ONE coroutine with the
+    // close awaited before the open starts. This is the fix for a real bug:
+    // closeCurrentPause and openNewPause used to each fire their own
+    // independent coroutine for their DB write, with no guaranteed order
+    // between them — Room's actual write completion time doesn't follow
+    // launch order, so on fast back-to-back switches the new row could get
+    // INSERTed before the old row's UPDATE (closing it) finished, leaving
+    // two rows simultaneously open. Doing both writes sequentially in one
+    // coroutine makes that impossible.
+    private fun switchPauseApp(now: Long, newPackage: String, newAppName: String) {
+        val open = openPauseEvent ?: return
+        val session = currentSession ?: return
+        val duration = (now - open.startTime).coerceAtLeast(0)
+        val closed = open.copy(endTime = now, durationMs = duration)
+
+        currentSession = session.copy(pauseTimeMs = session.pauseTimeMs + duration, updatedAt = now)
+        val newEvent = PauseEvent(
+            sessionId = session.id,
+            startTime = now,
+            reason = PauseReason.APP_SWITCH,
+            appPackage = newPackage,
+            appName = newAppName
+        )
+        openPauseEvent = newEvent
+
+        _state.value = _state.value.copy(
+            pauseTimeMs = currentSession?.pauseTimeMs ?: _state.value.pauseTimeMs,
+            currentPauseAppName = newAppName
+        )
+
+        managerScope.launch {
+            repository.updatePauseEvent(closed)               // close the old row first...
+            val id = repository.insertPauseEvent(newEvent)    // ...only then create the new one
+            if (openPauseEvent === newEvent) {
+                openPauseEvent = newEvent.copy(id = id)
+            }
+            currentSession?.let { repository.updateSession(it) }
+        }
+    }
+
+    // Always closes a pause AND resumes focus — the other case (switching
+    // between two non-work apps while still paused) goes through
+    // switchPauseApp instead, which never resumes.
+    private fun closeCurrentPause(now: Long) {
         val open = openPauseEvent ?: return
         val session = currentSession ?: return
         val duration = (now - open.startTime).coerceAtLeast(0)
@@ -366,19 +408,13 @@ object DeepWorkSessionManager {
             updatedAt = now
         )
 
-        if (resumeFocus) {
-            lastFocusStartTimestamp = now
-            _state.value = _state.value.copy(
-                phase = SessionPhase.RUNNING,
-                pauseTimeMs = currentSession?.pauseTimeMs ?: _state.value.pauseTimeMs,
-                currentPauseReason = null,
-                currentPauseAppName = null
-            )
-        } else {
-            _state.value = _state.value.copy(
-                pauseTimeMs = currentSession?.pauseTimeMs ?: _state.value.pauseTimeMs
-            )
-        }
+        lastFocusStartTimestamp = now
+        _state.value = _state.value.copy(
+            phase = SessionPhase.RUNNING,
+            pauseTimeMs = currentSession?.pauseTimeMs ?: _state.value.pauseTimeMs,
+            currentPauseReason = null,
+            currentPauseAppName = null
+        )
 
         managerScope.launch {
             repository.updatePauseEvent(closed)
