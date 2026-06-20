@@ -116,16 +116,31 @@ class DeepWorkSessionService : Service() {
             SessionPhase.PAUSED -> "Paused" + (state.currentPauseAppName?.let { " — $it" } ?: "")
             SessionPhase.IDLE -> "UltraFocus"
         }
-        val focusedStr = DurationFormatter.formatCompact(state.focusedTimeMs)
-        val text = "Focused $focusedStr · ${state.pauseCount} pause${if (state.pauseCount == 1) "" else "s"}"
+        val remaining = (state.targetDurationMs - state.focusedTimeMs).coerceAtLeast(0)
+        val pauseInfo = "${state.pauseCount} pause${if (state.pauseCount == 1) "" else "s"}"
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(title)
-            .setContentText(text)
             .setContentIntent(openIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+
+        if (state.phase == SessionPhase.RUNNING) {
+            // Native countdown — the system ticks this on its own once set,
+            // no per-second updates needed from us. Pull down notifications
+            // and it's right there counting down, like a clock app's timer.
+            builder.setUsesChronometer(true)
+                .setChronometerCountDown(true)
+                .setWhen(System.currentTimeMillis() + remaining)
+                .setContentText(pauseInfo)
+        } else {
+            // The system chronometer always ticks in real time once set —
+            // it can't be "frozen" — so while paused we show a static
+            // remaining-time line instead of a live (and misleading) clock.
+            builder.setUsesChronometer(false)
+                .setContentText("${DurationFormatter.formatClock(remaining)} left · $pauseInfo")
+        }
 
         when {
             state.phase == SessionPhase.RUNNING ->

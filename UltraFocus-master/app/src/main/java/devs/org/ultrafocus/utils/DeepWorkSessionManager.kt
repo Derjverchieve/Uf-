@@ -1,6 +1,10 @@
 package devs.org.ultrafocus.utils
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import androidx.core.content.ContextCompat
 import devs.org.ultrafocus.database.AppDatabase
 import devs.org.ultrafocus.model.AppBreakItem
 import devs.org.ultrafocus.model.DeepWorkUiState
@@ -64,6 +68,11 @@ object DeepWorkSessionManager {
     // leaving the work app — otherwise checking the status is the one thing
     // guaranteed to break the very thing you're checking.
     private const val SESSION_SCREEN_CLASS = "devs.org.ultrafocus.activities.DeepWorkSessionActivity"
+    // Notification shade / quick settings / recents overview. Checking these
+    // is an unambiguous distraction — no grace period, pauses immediately.
+    // (Doesn't cover every OEM skin's notification panel implementation —
+    // some heavily customized launchers may not report this reliably.)
+    private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
 
     private lateinit var appContext: Context
     private lateinit var repository: DeepWorkRepository
@@ -93,6 +102,7 @@ object DeepWorkSessionManager {
     private var graceJob: Job? = null
     private var tickerJob: Job? = null
     private var tickCount = 0
+    private var screenReceiver: BroadcastReceiver? = null
 
     @Synchronized
     fun init(context: Context) {
@@ -100,7 +110,37 @@ object DeepWorkSessionManager {
         appContext = context.applicationContext
         repository = DeepWorkRepository(AppDatabase.getDatabase(appContext))
         initialized = true
+        registerScreenOffReceiver()
         managerScope.launch { recoverOrphanedSession() }
+    }
+
+    // Locking the phone doesn't change which app/window is "foreground" from
+    // the accessibility service's point of view, so TYPE_WINDOW_STATE_CHANGED
+    // alone won't catch it. This is the actual, reliable signal for it.
+    private fun registerScreenOffReceiver() {
+        if (screenReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (intent.action == Intent.ACTION_SCREEN_OFF) onScreenOff()
+            }
+        }
+        ContextCompat.registerReceiver(
+            appContext, receiver, IntentFilter(Intent.ACTION_SCREEN_OFF),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        screenReceiver = receiver
+    }
+
+    private fun onScreenOff() {
+        if (_state.value.phase != SessionPhase.RUNNING) return
+        currentSession ?: return
+        // No grace period here — you can't be working if you can't see the
+        // screen. Resuming still requires actually being back in the primary
+        // app afterward (handled normally once the screen wakes up and the
+        // accessibility service reports it), not just the screen turning on.
+        graceJob?.cancel(); graceJob = null
+        lastSeenForegroundPackage = null
+        openNewPause(System.currentTimeMillis(), PauseReason.APP_SWITCH, appPackage = null, appName = "Screen off", isNewBreak = true)
     }
 
     fun hasActiveSession(): Boolean = _state.value.phase != SessionPhase.IDLE
@@ -199,10 +239,26 @@ object DeepWorkSessionManager {
     fun onForegroundAppChanged(packageName: String, className: String? = null) {
         if (!initialized) return
         if (packageName == appContext.packageName && className == SESSION_SCREEN_CLASS) return
+        if (isCurrentInputMethod(packageName)) return
         if (_state.value.phase == SessionPhase.IDLE) return
         if (packageName == lastSeenForegroundPackage) return
         lastSeenForegroundPackage = packageName
         evaluateForeground(packageName)
+    }
+
+    // Soft keyboards (Gboard, Samsung Keyboard, SwiftKey, etc.) can register
+    // as their own accessibility window separate from the app you're typing
+    // into, which would otherwise look exactly like leaving the primary app.
+    // Whichever IME is currently active is never treated as a departure.
+    private fun isCurrentInputMethod(packageName: String): Boolean {
+        return try {
+            val imeId = android.provider.Settings.Secure.getString(
+                appContext.contentResolver, android.provider.Settings.Secure.DEFAULT_INPUT_METHOD
+            )
+            imeId != null && imeId.substringBefore("/") == packageName
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun evaluateForeground(packageName: String) {
@@ -220,7 +276,10 @@ object DeepWorkSessionManager {
 
         when (phase) {
             SessionPhase.RUNNING -> {
-                if (graceJob == null) {
+                if (packageName == SYSTEM_UI_PACKAGE) {
+                    graceJob?.cancel(); graceJob = null
+                    openNewPause(now, PauseReason.APP_SWITCH, packageName, "Notifications", isNewBreak = true)
+                } else if (graceJob == null) {
                     val awayStart = now
                     graceJob = managerScope.launch {
                         delay(GRACE_PERIOD_MS)
@@ -440,6 +499,11 @@ object DeepWorkSessionManager {
         tickCount++
         if (phase == SessionPhase.RUNNING && tickCount % CHECKPOINT_INTERVAL_TICKS == 0) {
             currentSession = session.copy(focusedTimeMs = liveFocused, updatedAt = now)
+            // Critical: without this, the next tick re-measures from the
+            // ORIGINAL segment start on top of the value we just saved,
+            // double-counting everything since then. Every checkpoint must
+            // reset the baseline exactly like a real resume does.
+            lastFocusStartTimestamp = now
             managerScope.launch { currentSession?.let { repository.updateSession(it) } }
         }
     }

@@ -1,7 +1,6 @@
 package devs.org.ultrafocus.utils
 
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 
 object DurationFormatter {
 
@@ -18,15 +17,16 @@ object DurationFormatter {
         }
     }
 
-    /** "1h 23m", "23m" — for summaries/history where second-level precision isn't useful. */
+    /** "1h 23m 04s", "23m 04s", "45s" — for summaries/history, now with second-level precision. */
     fun formatCompact(ms: Long): String {
-        val totalMinutes = TimeUnit.MILLISECONDS.toMinutes(ms)
-        val hours = totalMinutes / 60
-        val minutes = totalMinutes % 60
-        return when {
-            hours > 0 && minutes > 0 -> "${hours}h ${minutes}m"
-            hours > 0 -> "${hours}h"
-            else -> "${minutes}m"
+        val totalSeconds = ms / 1000
+        val hours = totalSeconds / 3600
+        val minutes = (totalSeconds % 3600) / 60
+        val seconds = totalSeconds % 60
+        return buildString {
+            if (hours > 0) append("${hours}h ")
+            if (hours > 0 || minutes > 0) append("${minutes}m ")
+            append("${seconds}s")
         }
     }
 }
