@@ -6,7 +6,9 @@ import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
@@ -36,6 +38,11 @@ class DeepWorkSessionActivity : AppCompatActivity() {
     private lateinit var binding: ActivityDeepWorkSessionBinding
     private lateinit var repository: DeepWorkRepository
 
+    // Must be registered during Activity initialization (not inside onCreate
+    // logic) — this satisfies that.
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* no-op either way */ }
+
     private var selectedAppPackage: String? = null
     private var selectedAppName: String? = null
 
@@ -59,6 +66,7 @@ class DeepWorkSessionActivity : AppCompatActivity() {
 
         repository = DeepWorkRepository(AppDatabase.getDatabase(this))
         DeepWorkSessionManager.init(applicationContext)
+        requestNotificationPermissionIfNeeded()
 
         setupRecyclerViews()
         restoreLastPrimaryApp()
@@ -66,6 +74,16 @@ class DeepWorkSessionActivity : AppCompatActivity() {
         observeState()
         observeSummary()
         observeHistory()
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
     }
 
     private fun setupRecyclerViews() {

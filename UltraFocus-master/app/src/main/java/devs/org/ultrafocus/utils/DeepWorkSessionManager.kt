@@ -60,6 +60,10 @@ object DeepWorkSessionManager {
 
     private const val GRACE_PERIOD_MS = 5_000L
     private const val CHECKPOINT_INTERVAL_TICKS = 30 // checkpoint to DB roughly every ~30s while running
+    // Opening this screen to check on your session shouldn't itself count as
+    // leaving the work app — otherwise checking the status is the one thing
+    // guaranteed to break the very thing you're checking.
+    private const val SESSION_SCREEN_CLASS = "devs.org.ultrafocus.activities.DeepWorkSessionActivity"
 
     private lateinit var appContext: Context
     private lateinit var repository: DeepWorkRepository
@@ -192,8 +196,9 @@ object DeepWorkSessionManager {
 
     // ── Called from BlockerAccessibilityService on every foreground-app change ──
 
-    fun onForegroundAppChanged(packageName: String) {
+    fun onForegroundAppChanged(packageName: String, className: String? = null) {
         if (!initialized) return
+        if (packageName == appContext.packageName && className == SESSION_SCREEN_CLASS) return
         if (_state.value.phase == SessionPhase.IDLE) return
         if (packageName == lastSeenForegroundPackage) return
         lastSeenForegroundPackage = packageName

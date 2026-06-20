@@ -159,7 +159,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         // the existing blocking behaviour.
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             try {
-                devs.org.ultrafocus.utils.DeepWorkSessionManager.onForegroundAppChanged(packageName)
+                devs.org.ultrafocus.utils.DeepWorkSessionManager.onForegroundAppChanged(packageName, className)
             } catch (_: Exception) {}
         }
 
