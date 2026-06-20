@@ -68,11 +68,6 @@ object DeepWorkSessionManager {
     // leaving the work app — otherwise checking the status is the one thing
     // guaranteed to break the very thing you're checking.
     private const val SESSION_SCREEN_CLASS = "devs.org.ultrafocus.activities.DeepWorkSessionActivity"
-    // Notification shade / quick settings / recents overview. Checking these
-    // is an unambiguous distraction — no grace period, pauses immediately.
-    // (Doesn't cover every OEM skin's notification panel implementation —
-    // some heavily customized launchers may not report this reliably.)
-    private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
 
     private lateinit var appContext: Context
     private lateinit var repository: DeepWorkRepository
@@ -276,10 +271,7 @@ object DeepWorkSessionManager {
 
         when (phase) {
             SessionPhase.RUNNING -> {
-                if (packageName == SYSTEM_UI_PACKAGE) {
-                    graceJob?.cancel(); graceJob = null
-                    openNewPause(now, PauseReason.APP_SWITCH, packageName, "Notifications", isNewBreak = true)
-                } else if (graceJob == null) {
+                if (graceJob == null) {
                     val awayStart = now
                     graceJob = managerScope.launch {
                         delay(GRACE_PERIOD_MS)
