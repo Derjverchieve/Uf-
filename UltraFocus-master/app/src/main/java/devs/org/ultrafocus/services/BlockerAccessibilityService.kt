@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import devs.org.ultrafocus.activities.BlockedAppActivity
 import devs.org.ultrafocus.activities.SoftBlockActivity
 import devs.org.ultrafocus.database.AppDatabase
@@ -23,6 +24,18 @@ import devs.org.ultrafocus.utils.WebsiteBlockManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
 import java.util.Calendar
+
+// Window types that are never meaningfully "a different app" for deep-work
+// tracking purposes, regardless of which package happens to own them —
+// keyboards, accessibility overlays (including this app's own block screen),
+// the split-screen divider, and the magnifier. Deliberately excludes
+// TYPE_SYSTEM (notification shade) — see DeepWorkSessionManager for why.
+private val DEEP_WORK_EXEMPT_WINDOW_TYPES = setOf(
+    AccessibilityWindowInfo.TYPE_INPUT_METHOD,
+    AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY,
+    AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER,
+    AccessibilityWindowInfo.TYPE_MAGNIFICATION_OVERLAY
+)
 
 class BlockerAccessibilityService : AccessibilityService() {
 
@@ -159,7 +172,15 @@ class BlockerAccessibilityService : AccessibilityService() {
         // the existing blocking behaviour.
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             try {
-                devs.org.ultrafocus.utils.DeepWorkSessionManager.onForegroundAppChanged(packageName, className)
+                val windowType = try {
+                    windows.firstOrNull { it.id == event.windowId }?.type
+                } catch (_: Exception) {
+                    null
+                }
+                val isExemptWindowType = windowType != null && windowType in DEEP_WORK_EXEMPT_WINDOW_TYPES
+                devs.org.ultrafocus.utils.DeepWorkSessionManager.onForegroundAppChanged(
+                    packageName, className, isExemptWindowType
+                )
             } catch (_: Exception) {}
         }
 

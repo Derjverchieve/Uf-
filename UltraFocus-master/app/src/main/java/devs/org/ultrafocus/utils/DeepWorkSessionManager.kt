@@ -238,10 +238,17 @@ object DeepWorkSessionManager {
 
     // ── Called from BlockerAccessibilityService on every foreground-app change ──
 
-    fun onForegroundAppChanged(packageName: String, className: String? = null) {
+    fun onForegroundAppChanged(packageName: String, className: String? = null, isExemptWindowType: Boolean = false) {
         if (!initialized) return
         if (packageName == appContext.packageName && className == SESSION_SCREEN_CLASS) return
         if (isCurrentInputMethod(packageName)) return
+        // A window the OS itself classifies as IME / accessibility overlay /
+        // split-screen divider / magnifier — never really "a different app",
+        // regardless of what package happens to own it. Deliberately doesn't
+        // cover TYPE_SYSTEM (notification shade) — a flicker and a genuine
+        // multi-second check report the same window type, so duration (the
+        // grace period) is the only thing that can tell those apart.
+        if (isExemptWindowType) return
         if (_state.value.phase == SessionPhase.IDLE) return
         if (packageName == lastSeenForegroundPackage) return
         lastSeenForegroundPackage = packageName
