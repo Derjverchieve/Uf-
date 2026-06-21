@@ -93,7 +93,7 @@ object DeepWorkSessionManager {
     // genuinely navigates to the launcher or pulls down the shade and stays there
     // for 40s, a pause is still recorded correctly.
     private val LONG_GRACE_PACKAGES = setOf(
-        "com.hios.launcher",
+        "com.transsion.hilauncher",
         "com.transsion.xlauncher",
         "com.android.launcher3",
         "com.google.android.apps.nexuslauncher",
