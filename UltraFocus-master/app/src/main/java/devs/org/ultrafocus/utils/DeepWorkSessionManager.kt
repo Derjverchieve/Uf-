@@ -80,7 +80,7 @@ object DeepWorkSessionManager {
     )
 
     private const val GRACE_PERIOD_MS = 10_000L
-    private const val LONG_GRACE_PERIOD_MS = 100_000L
+    private const val LONG_GRACE_PERIOD_MS = 130_000L
     private const val SUB_SWITCH_GRACE_MS = 3_000L
     private const val CHECKPOINT_INTERVAL_TICKS = 30 // checkpoint to DB roughly every ~30s while running
 
