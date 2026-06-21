@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -61,16 +60,11 @@ private val LAUNCHER_PACKAGES_NEEDING_WEBVIEW_GUARD = setOf(
     "com.sec.android.app.launcher",             // Samsung One UI
     "com.samsung.android.app.launcher",         // Samsung (alt package)
 )
-
-// ── Event stream debug logger ────────────────────────────────────────────────
-// Set DEBUG_EVENT_LOG = true, install, then run:
-//   adb logcat -s UF_EVENTS
-// Tap "Show Answer" in AnkiDroid during a session and you'll see every
-// TYPE_WINDOW_STATE_CHANGED event with the full live window stack next to it.
-// You can immediately see HiOS Launcher and AnkiDroid appearing together and
-// whether the phantom guard fired. Set back to false before release.
-private const val DEBUG_EVENT_LOG = false
-private const val LOG_TAG = "UF_EVENTS"
+// Deep Work event stream capture is wired into the existing DebugCaptureManager
+// (same system used by DebugCaptureActivity). Arm it from the debug screen and
+// reproduce the issue — every TYPE_WINDOW_STATE_CHANGED during an active session
+// is recorded with the full live window stack and a decision label so you can
+// see HiOS Launcher and AnkiDroid appearing together.
 
 class BlockerAccessibilityService : AccessibilityService() {
 
@@ -235,31 +229,47 @@ class BlockerAccessibilityService : AccessibilityService() {
                         } catch (_: Exception) { false }
                     }
 
-                // ── Debug: log the raw event stream during an active session ──
-                // adb logcat -s UF_EVENTS   (flip DEBUG_EVENT_LOG = true first)
-                if (DEBUG_EVENT_LOG &&
-                    devs.org.ultrafocus.utils.DeepWorkSessionManager.hasActiveSession()) {
-                    val windowSnapshot = try {
-                        windows.joinToString(separator = " | ") { w ->
-                            val pkg = w.root?.packageName?.toString() ?: "null"
+                // ── Wire into the existing in-app debug capture system ────────
+                // Arm a capture from the Debug Capture screen, then tap "Show
+                // Answer" in AnkiDroid. Every TYPE_WINDOW_STATE_CHANGED during
+                // an active session is recorded with the full live window stack
+                // and a decision label (FORWARDED / PHANTOM-SWALLOWED /
+                // EXEMPT-WINTYPE), so you can see HiOS Launcher and AnkiDroid
+                // appearing side-by-side in the same snapshot and confirm the
+                // phantom guard is firing correctly.
+                if (devs.org.ultrafocus.utils.DeepWorkSessionManager.hasActiveSession() &&
+                    devs.org.ultrafocus.utils.DebugCaptureManager.isCaptureArmed(this)) {
+
+                    val windowStack = try {
+                        windows.map { w ->
+                            val pkg  = w.root?.packageName?.toString() ?: "null"
                             val type = when (w.type) {
-                                AccessibilityWindowInfo.TYPE_APPLICATION         -> "APP"
-                                AccessibilityWindowInfo.TYPE_INPUT_METHOD        -> "IME"
-                                AccessibilityWindowInfo.TYPE_SYSTEM              -> "SYS"
+                                AccessibilityWindowInfo.TYPE_APPLICATION          -> "APP"
+                                AccessibilityWindowInfo.TYPE_INPUT_METHOD         -> "IME"
+                                AccessibilityWindowInfo.TYPE_SYSTEM               -> "SYS"
                                 AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> "A11Y"
                                 AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER -> "SPLIT"
-                                else                                             -> "type=${w.type}"
+                                else -> "t${w.type}"
                             }
                             "$pkg($type)"
                         }
-                    } catch (_: Exception) { "window-list-unavailable" }
+                    } catch (_: Exception) { emptyList() }
 
                     val decision = when {
-                        isExemptWindowType      -> "EXEMPT-WINTYPE"
-                        isPhantomLauncherEvent  -> "PHANTOM-SWALLOWED"
-                        else                    -> "FORWARDED"
+                        isExemptWindowType     -> "EXEMPT-WINTYPE"
+                        isPhantomLauncherEvent -> "PHANTOM-SWALLOWED"
+                        else                   -> "FORWARDED"
                     }
-                    Log.d(LOG_TAG, "[$decision] pkg=$packageName cls=$className | stack=[$windowSnapshot]")
+
+                    devs.org.ultrafocus.utils.DebugCaptureManager.record(
+                        context     = this,
+                        packageName = packageName,
+                        eventType   = event.eventType,
+                        className   = className,
+                        windowCount = windowStack.size,
+                        rootClasses = windowStack,   // full live stack, one entry per window
+                        note        = "DW:$decision"
+                    )
                 }
 
                 if (!isPhantomLauncherEvent) {
