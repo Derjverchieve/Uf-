@@ -279,7 +279,10 @@ class DeepWorkSessionActivity : AppCompatActivity() {
             repository.observePauseEventsForSession(sessionId).collectLatest { events ->
                 val rows = events.sortedByDescending { it.startTime }.map {
                     PauseRow(
-                        label = it.appName ?: "Manual pause",
+                        label = buildString {
+                            append(it.appName ?: "Manual pause")
+                            if (!it.appPackage.isNullOrBlank()) append("\n${it.appPackage}")
+                        },
                         durationMs = it.durationMs,
                         ongoing = it.endTime == null
                     )
