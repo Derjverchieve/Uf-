@@ -80,8 +80,29 @@ object DeepWorkSessionManager {
     )
 
     private const val GRACE_PERIOD_MS = 10_000L
+    private const val LONG_GRACE_PERIOD_MS = 40_000L
     private const val SUB_SWITCH_GRACE_MS = 3_000L
     private const val CHECKPOINT_INTERVAL_TICKS = 30 // checkpoint to DB roughly every ~30s while running
+
+    // Packages that receive a 40-second grace period instead of the normal 10s.
+    // HiOS Launcher and SystemUI both fire spurious TYPE_WINDOW_STATE_CHANGED
+    // events during WebView content transitions (e.g. AnkiDroid tapping "Show
+    // Answer"), making it look like the user left the primary app when they
+    // haven't. A 40-second window means any such flicker — which lasts well
+    // under a second — is always forgiven without logging a pause. If the user
+    // genuinely navigates to the launcher or pulls down the shade and stays there
+    // for 40s, a pause is still recorded correctly.
+    private val LONG_GRACE_PACKAGES = setOf(
+        "com.hios.launcher",
+        "com.transsion.xlauncher",
+        "com.android.launcher3",
+        "com.google.android.apps.nexuslauncher",
+        "com.hihonor.android.launcher",
+        "com.miui.home",
+        "com.sec.android.app.launcher",
+        "com.samsung.android.app.launcher",
+        "com.android.systemui",
+    )
 
     private lateinit var appContext: Context
     private lateinit var repository: DeepWorkRepository
@@ -328,8 +349,9 @@ object DeepWorkSessionManager {
         when (phase) {
             SessionPhase.RUNNING -> {
                 if (graceJob == null) {
+                    val grace = if (packageName in LONG_GRACE_PACKAGES) LONG_GRACE_PERIOD_MS else GRACE_PERIOD_MS
                     graceJob = managerScope.launch {
-                        delay(GRACE_PERIOD_MS)
+                        delay(grace)
                         graceJob = null
                         val stillAway = lastSeenForegroundPackage != session.primaryAppPackage
                         if (stillAway) {
