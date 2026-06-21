@@ -37,6 +37,30 @@ private val DEEP_WORK_EXEMPT_WINDOW_TYPES = setOf(
     AccessibilityWindowInfo.TYPE_MAGNIFICATION_OVERLAY
 )
 
+// OEM launcher / system-shell packages known to fire spurious
+// TYPE_WINDOW_STATE_CHANGED events during WebView content transitions — most
+// commonly when an app like AnkiDroid renders new content in a WebView (e.g.
+// tapping "Show Answer"). HiOS in particular fires its own launcher package
+// as the foreground window during these transitions even though the user never
+// actually left the primary app.
+//
+// When an event from one of these packages arrives while a deep work session
+// is active, we cross-check the live accessibility window stack: if the
+// primary app's window is still present the event is a phantom and is
+// discarded. Only if the primary app's window is genuinely gone do we forward
+// the event as a real departure (so a genuine home-press still triggers a pause
+// correctly).
+private val LAUNCHER_PACKAGES_NEEDING_WEBVIEW_GUARD = setOf(
+    "com.hios.launcher",                        // HiOS — TECNO / Infinix
+    "com.transsion.xlauncher",                  // older TRANSSION / Infinix launcher
+    "com.android.launcher3",                    // stock AOSP
+    "com.google.android.apps.nexuslauncher",    // Pixel launcher
+    "com.hihonor.android.launcher",             // Honor / HiSilicon
+    "com.miui.home",                            // Xiaomi MIUI
+    "com.sec.android.app.launcher",             // Samsung One UI
+    "com.samsung.android.app.launcher",         // Samsung (alt package)
+)
+
 class BlockerAccessibilityService : AccessibilityService() {
 
     private data class BrowserConfig(
@@ -178,9 +202,33 @@ class BlockerAccessibilityService : AccessibilityService() {
                     null
                 }
                 val isExemptWindowType = windowType != null && windowType in DEEP_WORK_EXEMPT_WINDOW_TYPES
-                devs.org.ultrafocus.utils.DeepWorkSessionManager.onForegroundAppChanged(
-                    packageName, className, isExemptWindowType
-                )
+
+                // HiOS (and some other OEM skins) fire spurious launcher-package
+                // events during WebView content transitions — most commonly when
+                // AnkiDroid renders "Show Answer" in its embedded WebView. The
+                // event makes it look like the user navigated to the home screen
+                // when they haven't moved at all.
+                //
+                // Guard: if the package is a known launcher AND the primary app's
+                // window is still visible in the live accessibility window stack,
+                // this is a phantom event — discard it. If the user genuinely
+                // pressed Home the primary app's window will be gone and the
+                // check fails, so a real departure still triggers a pause normally.
+                val isPhantomLauncherEvent = !isExemptWindowType
+                    && packageName in LAUNCHER_PACKAGES_NEEDING_WEBVIEW_GUARD
+                    && run {
+                        val primaryPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager
+                            .state.value.primaryAppPackage
+                        primaryPkg != null && try {
+                            windows.any { w -> w.root?.packageName?.toString() == primaryPkg }
+                        } catch (_: Exception) { false }
+                    }
+
+                if (!isPhantomLauncherEvent) {
+                    devs.org.ultrafocus.utils.DeepWorkSessionManager.onForegroundAppChanged(
+                        packageName, className, isExemptWindowType
+                    )
+                }
             } catch (_: Exception) {}
         }
 
