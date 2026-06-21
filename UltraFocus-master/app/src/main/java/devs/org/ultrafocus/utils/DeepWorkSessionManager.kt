@@ -19,6 +19,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -41,19 +42,21 @@ import kotlinx.coroutines.launch
  *  period (GRACE_PERIOD_MS) starts instead. If the user is back in the
  *  primary app before it elapses, nothing is recorded — the whole blip is
  *  forgiven and counts as continued focus. If the grace period elapses, a
- *  PauseEvent is logged retroactively starting from the moment they
- *  actually left (not from when the grace period happened to end), so the
- *  numbers stay honest.
+ *  PauseEvent is logged starting from the moment the grace period itself
+ *  expires (not from when they first left) — the grace window counts as
+ *  continued focus, not as part of the pause.
  *
  *  Returning to the primary app always resumes immediately — no grace
  *  delay on the way back in.
  *
  *  Switching between two *different* non-work apps while already paused
- *  doesn't reset or re-trigger the grace period — it just closes the
- *  current PauseEvent and opens a new one for the new app, so the
- *  "which app, for how long" breakdown stays accurate without inflating
- *  the pause count (a "pause" = one continuous break from work, however
- *  many apps you bounce through during it).
+ *  goes through its own short debounce (SUB_SWITCH_GRACE_MS) before the
+ *  breakdown's "current app" actually changes. This absorbs OS-level window
+ *  flicker — some launchers/skins fire spurious foreground-window events
+ *  for their own UI (gesture handling, edge panels, etc.) without the user
+ *  actually navigating anywhere — without inflating the pause count (a
+ *  "pause" = one continuous break from work, however many apps, real or
+ *  phantom, flicker past during it).
  *
  *  An auto-pause can only be cleared by actually returning to the primary
  *  app — resumeManually() deliberately refuses to clear anything but a
@@ -62,12 +65,23 @@ import kotlinx.coroutines.launch
  */
 object DeepWorkSessionManager {
 
+    // A pause that's currently open. `id` starts at 0 and is mutated IN
+    // PLACE once its INSERT actually completes — see writeQueue below for
+    // why that matters. Plain class (not data class) on purpose: nothing
+    // should ever .copy() this and silently fork the id away from the
+    // shared object the queue updates.
+    private class OpenPause(
+        var id: Long = 0L,
+        val sessionId: Long,
+        val startTime: Long,
+        val reason: PauseReason,
+        val appPackage: String?,
+        val appName: String?
+    )
+
     private const val GRACE_PERIOD_MS = 10_000L
+    private const val SUB_SWITCH_GRACE_MS = 3_000L
     private const val CHECKPOINT_INTERVAL_TICKS = 30 // checkpoint to DB roughly every ~30s while running
-    // Opening this screen to check on your session shouldn't itself count as
-    // leaving the work app — otherwise checking the status is the one thing
-    // guaranteed to break the very thing you're checking.
-    private const val SESSION_SCREEN_CLASS = "devs.org.ultrafocus.activities.DeepWorkSessionActivity"
 
     private lateinit var appContext: Context
     private lateinit var repository: DeepWorkRepository
@@ -90,11 +104,26 @@ object DeepWorkSessionManager {
     // reads/writes during a session work off this copy rather than hitting
     // the DB every time.
     private var currentSession: FocusSession? = null
-    private var openPauseEvent: PauseEvent? = null
+    private var openPauseEvent: OpenPause? = null
+
+    // Every session/pause DB write goes through here instead of its own
+    // independent coroutine. A single consumer drains it, so writes always
+    // execute in exactly the order they were enqueued — no matter how fast
+    // new ones get added (e.g. a rapid burst of app-switch events from an
+    // OS gesture animation, easily faster than a single Room round-trip).
+    // This is what makes it safe for a later write to read an OpenPause's
+    // `id` at execution time — by the time it runs, the earlier write that
+    // resolves that id is guaranteed to have already finished.
+    private val writeQueue = Channel<suspend () -> Unit>(capacity = Channel.UNLIMITED)
+
+    private fun enqueueWrite(block: suspend () -> Unit) {
+        writeQueue.trySend(block)
+    }
 
     private var lastFocusStartTimestamp: Long = 0L
     private var lastSeenForegroundPackage: String? = null
     private var graceJob: Job? = null
+    private var subSwitchGraceJob: Job? = null
     private var tickerJob: Job? = null
     private var tickCount = 0
     private var screenReceiver: BroadcastReceiver? = null
@@ -112,6 +141,11 @@ object DeepWorkSessionManager {
         repository = DeepWorkRepository(AppDatabase.getDatabase(appContext))
         initialized = true
         registerScreenOffReceiver()
+        managerScope.launch {
+            for (write in writeQueue) {
+                try { write() } catch (_: Exception) {}
+            }
+        }
         managerScope.launch { recoverOrphanedSession() }
     }
 
@@ -197,6 +231,7 @@ object DeepWorkSessionManager {
             openPauseEvent = null
             lastFocusStartTimestamp = now
             graceJob?.cancel(); graceJob = null
+            subSwitchGraceJob?.cancel(); subSwitchGraceJob = null
             tickCount = 0
             targetReachedFired = false
             // Best guess at "where we are right now" — almost always our own
@@ -240,7 +275,13 @@ object DeepWorkSessionManager {
 
     fun onForegroundAppChanged(packageName: String, className: String? = null, isExemptWindowType: Boolean = false) {
         if (!initialized) return
-        if (packageName == appContext.packageName && className == SESSION_SCREEN_CLASS) return
+        // Any part of OUR OWN app — not just the session screen — is exempt.
+        // This used to be scoped to just the session screen's exact class
+        // name, but that's brittle: some OEM skins don't report activity
+        // class names reliably, which made checking your own session status
+        // look exactly like leaving the work app. Broader but safer: being
+        // anywhere in UltraFocus never counts as a departure.
+        if (packageName == appContext.packageName) return
         if (isCurrentInputMethod(packageName)) return
         // A window the OS itself classifies as IME / accessibility overlay /
         // split-screen divider / magnifier — never really "a different app",
@@ -277,6 +318,7 @@ object DeepWorkSessionManager {
 
         if (packageName == session.primaryAppPackage) {
             graceJob?.cancel(); graceJob = null
+            subSwitchGraceJob?.cancel(); subSwitchGraceJob = null
             if (phase == SessionPhase.PAUSED) {
                 closeCurrentPause(now)
             }
@@ -305,7 +347,25 @@ object DeepWorkSessionManager {
             SessionPhase.PAUSED -> {
                 val open = openPauseEvent
                 if (open?.reason != PauseReason.MANUAL && open?.appPackage != packageName) {
-                    switchPauseApp(now, packageName, resolveAppName(packageName))
+                    // Debounce, don't commit immediately: rapid, very short
+                    // flickers between apps while already paused — including
+                    // ones the OS itself generates (launcher edge-gesture
+                    // handling, system overlays) rather than the user
+                    // actually navigating anywhere — would otherwise
+                    // fragment the breakdown into dozens of near-zero
+                    // entries. Every new differing package cancels and
+                    // restarts this; only once something holds steady for
+                    // the full debounce does the switch actually commit.
+                    subSwitchGraceJob?.cancel()
+                    subSwitchGraceJob = managerScope.launch {
+                        delay(SUB_SWITCH_GRACE_MS)
+                        subSwitchGraceJob = null
+                        if (lastSeenForegroundPackage == packageName && openPauseEvent === open) {
+                            switchPauseApp(System.currentTimeMillis(), packageName, resolveAppName(packageName))
+                        }
+                    }
+                } else {
+                    subSwitchGraceJob?.cancel(); subSwitchGraceJob = null
                 }
             }
             SessionPhase.IDLE -> {}
@@ -314,7 +374,7 @@ object DeepWorkSessionManager {
 
     // ── Internal transition helpers ─────────────────────────────────────────
     // Each of these mutates in-memory state synchronously (so the UI updates
-    // instantly) and then fires off the Room write in a child coroutine.
+    // instantly) and enqueues the Room write rather than persisting inline.
 
     // Always represents a genuine RUNNING → PAUSED transition (the one other
     // case — switching between two non-work apps while already paused — goes
@@ -330,14 +390,11 @@ object DeepWorkSessionManager {
             updatedAt = System.currentTimeMillis()
         )
 
-        val event = PauseEvent(
-            sessionId = session.id,
-            startTime = startTime,
-            reason = reason,
-            appPackage = appPackage,
-            appName = appName
+        val record = OpenPause(
+            sessionId = session.id, startTime = startTime, reason = reason,
+            appPackage = appPackage, appName = appName
         )
-        openPauseEvent = event
+        openPauseEvent = record
 
         _state.value = _state.value.copy(
             phase = SessionPhase.PAUSED,
@@ -347,55 +404,62 @@ object DeepWorkSessionManager {
             currentPauseAppName = appName
         )
 
-        managerScope.launch {
-            val id = repository.insertPauseEvent(event)
-            // Guard against a fast follow-up transition already having
-            // replaced openPauseEvent before this insert returned.
-            if (openPauseEvent === event) {
-                openPauseEvent = event.copy(id = id)
-            }
+        enqueueWrite {
+            val id = repository.insertPauseEvent(
+                PauseEvent(
+                    sessionId = record.sessionId, startTime = record.startTime,
+                    reason = record.reason, appPackage = record.appPackage, appName = record.appName
+                )
+            )
+            record.id = id // mutated in place — any later write referencing this SAME record sees the real id
             currentSession?.let { repository.updateSession(it) }
         }
     }
 
-    // Switching between two different non-work apps while already paused —
-    // e.g. launcher to a different app to System UI. Closes the old pause
-    // row and opens a new one for the new app, in ONE coroutine with the
-    // close awaited before the open starts. This is the fix for a real bug:
-    // closeCurrentPause and openNewPause used to each fire their own
-    // independent coroutine for their DB write, with no guaranteed order
-    // between them — Room's actual write completion time doesn't follow
-    // launch order, so on fast back-to-back switches the new row could get
-    // INSERTed before the old row's UPDATE (closing it) finished, leaving
-    // two rows simultaneously open. Doing both writes sequentially in one
-    // coroutine makes that impossible.
+    // Switching between two different non-work apps while already paused.
+    // Closes the old pause row and opens a new one, in ONE enqueued write
+    // with the close ordered before the open. Reads `open.id` at EXECUTION
+    // time (not when this function is called) — by the time this write
+    // actually runs, the FIFO queue guarantees the earlier write that
+    // resolved `open`'s real id has already completed, even if this
+    // transition fired only milliseconds after that one. That ordering is
+    // what fixes a real bug: a fire-and-forget close could previously
+    // capture a still-zero placeholder id, silently fail to match any row,
+    // and leave the old pause permanently stuck open.
     private fun switchPauseApp(now: Long, newPackage: String, newAppName: String) {
         val open = openPauseEvent ?: return
         val session = currentSession ?: return
         val duration = (now - open.startTime).coerceAtLeast(0)
-        val closed = open.copy(endTime = now, durationMs = duration)
 
         currentSession = session.copy(pauseTimeMs = session.pauseTimeMs + duration, updatedAt = now)
-        val newEvent = PauseEvent(
-            sessionId = session.id,
-            startTime = now,
-            reason = PauseReason.APP_SWITCH,
-            appPackage = newPackage,
-            appName = newAppName
+        val newRecord = OpenPause(
+            sessionId = session.id, startTime = now, reason = PauseReason.APP_SWITCH,
+            appPackage = newPackage, appName = newAppName
         )
-        openPauseEvent = newEvent
+        openPauseEvent = newRecord
 
         _state.value = _state.value.copy(
             pauseTimeMs = currentSession?.pauseTimeMs ?: _state.value.pauseTimeMs,
             currentPauseAppName = newAppName
         )
 
-        managerScope.launch {
-            repository.updatePauseEvent(closed)               // close the old row first...
-            val id = repository.insertPauseEvent(newEvent)    // ...only then create the new one
-            if (openPauseEvent === newEvent) {
-                openPauseEvent = newEvent.copy(id = id)
+        enqueueWrite {
+            if (open.id != 0L) {
+                repository.updatePauseEvent(
+                    PauseEvent(
+                        id = open.id, sessionId = open.sessionId, startTime = open.startTime,
+                        endTime = now, durationMs = duration, reason = open.reason,
+                        appPackage = open.appPackage, appName = open.appName
+                    )
+                )
             }
+            val id = repository.insertPauseEvent(
+                PauseEvent(
+                    sessionId = newRecord.sessionId, startTime = newRecord.startTime,
+                    reason = newRecord.reason, appPackage = newRecord.appPackage, appName = newRecord.appName
+                )
+            )
+            newRecord.id = id
             currentSession?.let { repository.updateSession(it) }
         }
     }
@@ -407,13 +471,9 @@ object DeepWorkSessionManager {
         val open = openPauseEvent ?: return
         val session = currentSession ?: return
         val duration = (now - open.startTime).coerceAtLeast(0)
-        val closed = open.copy(endTime = now, durationMs = duration)
         openPauseEvent = null
 
-        currentSession = session.copy(
-            pauseTimeMs = session.pauseTimeMs + duration,
-            updatedAt = now
-        )
+        currentSession = session.copy(pauseTimeMs = session.pauseTimeMs + duration, updatedAt = now)
 
         lastFocusStartTimestamp = now
         _state.value = _state.value.copy(
@@ -423,8 +483,16 @@ object DeepWorkSessionManager {
             currentPauseAppName = null
         )
 
-        managerScope.launch {
-            repository.updatePauseEvent(closed)
+        enqueueWrite {
+            if (open.id != 0L) {
+                repository.updatePauseEvent(
+                    PauseEvent(
+                        id = open.id, sessionId = open.sessionId, startTime = open.startTime,
+                        endTime = now, durationMs = duration, reason = open.reason,
+                        appPackage = open.appPackage, appName = open.appName
+                    )
+                )
+            }
             currentSession?.let { repository.updateSession(it) }
         }
     }
@@ -435,17 +503,18 @@ object DeepWorkSessionManager {
         val now = System.currentTimeMillis()
 
         graceJob?.cancel(); graceJob = null
+        subSwitchGraceJob?.cancel(); subSwitchGraceJob = null
         tickerJob?.cancel(); tickerJob = null
 
         var finalSession = session
-        var closedPauseEvent: PauseEvent? = null
+        val openSnapshot = openPauseEvent
+        var pendingDuration: Long? = null
 
         when (_state.value.phase) {
             SessionPhase.PAUSED -> {
-                val open = openPauseEvent
-                if (open != null) {
-                    val duration = (now - open.startTime).coerceAtLeast(0)
-                    closedPauseEvent = open.copy(endTime = now, durationMs = duration)
+                if (openSnapshot != null) {
+                    val duration = (now - openSnapshot.startTime).coerceAtLeast(0)
+                    pendingDuration = duration
                     finalSession = finalSession.copy(pauseTimeMs = finalSession.pauseTimeMs + duration)
                 }
             }
@@ -464,8 +533,16 @@ object DeepWorkSessionManager {
         lastSeenForegroundPackage = null
         _state.value = DeepWorkUiState()
 
-        managerScope.launch {
-            closedPauseEvent?.let { repository.updatePauseEvent(it) }
+        enqueueWrite {
+            if (openSnapshot != null && pendingDuration != null && openSnapshot.id != 0L) {
+                repository.updatePauseEvent(
+                    PauseEvent(
+                        id = openSnapshot.id, sessionId = openSnapshot.sessionId, startTime = openSnapshot.startTime,
+                        endTime = now, durationMs = pendingDuration, reason = openSnapshot.reason,
+                        appPackage = openSnapshot.appPackage, appName = openSnapshot.appName
+                    )
+                )
+            }
             repository.updateSession(finalSession)
             _lastSummary.value = buildSummary(finalSession, status, now)
         }
@@ -551,7 +628,7 @@ object DeepWorkSessionManager {
             // double-counting everything since then. Every checkpoint must
             // reset the baseline exactly like a real resume does.
             lastFocusStartTimestamp = now
-            managerScope.launch { currentSession?.let { repository.updateSession(it) } }
+            enqueueWrite { currentSession?.let { repository.updateSession(it) } }
         }
     }
 
