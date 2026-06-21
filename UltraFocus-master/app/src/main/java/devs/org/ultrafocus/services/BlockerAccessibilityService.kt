@@ -37,35 +37,6 @@ private val DEEP_WORK_EXEMPT_WINDOW_TYPES = setOf(
     AccessibilityWindowInfo.TYPE_MAGNIFICATION_OVERLAY
 )
 
-// OEM launcher / system-shell packages known to fire spurious
-// TYPE_WINDOW_STATE_CHANGED events during WebView content transitions — most
-// commonly when an app like AnkiDroid renders new content in a WebView (e.g.
-// tapping "Show Answer"). HiOS in particular fires its own launcher package
-// as the foreground window during these transitions even though the user never
-// actually left the primary app.
-//
-// When an event from one of these packages arrives while a deep work session
-// is active, we cross-check the live accessibility window stack: if the
-// primary app's window is still present the event is a phantom and is
-// discarded. Only if the primary app's window is genuinely gone do we forward
-// the event as a real departure (so a genuine home-press still triggers a pause
-// correctly).
-private val LAUNCHER_PACKAGES_NEEDING_WEBVIEW_GUARD = setOf(
-    "com.hios.launcher",                        // HiOS — TECNO / Infinix
-    "com.transsion.xlauncher",                  // older TRANSSION / Infinix launcher
-    "com.android.launcher3",                    // stock AOSP
-    "com.google.android.apps.nexuslauncher",    // Pixel launcher
-    "com.hihonor.android.launcher",             // Honor / HiSilicon
-    "com.miui.home",                            // Xiaomi MIUI
-    "com.sec.android.app.launcher",             // Samsung One UI
-    "com.samsung.android.app.launcher",         // Samsung (alt package)
-)
-// Deep Work event stream capture is wired into the existing DebugCaptureManager
-// (same system used by DebugCaptureActivity). Arm it from the debug screen and
-// reproduce the issue — every TYPE_WINDOW_STATE_CHANGED during an active session
-// is recorded with the full live window stack and a decision label so you can
-// see HiOS Launcher and AnkiDroid appearing together.
-
 class BlockerAccessibilityService : AccessibilityService() {
 
     private data class BrowserConfig(
@@ -151,6 +122,17 @@ class BlockerAccessibilityService : AccessibilityService() {
             loadBlockedApps()
             isServiceReady = true
         } catch (_: Exception) {}
+
+        // Independent ground-truth check for the deep work tracker — see
+        // DeepWorkSessionManager.groundTruthProvider for why this exists.
+        devs.org.ultrafocus.utils.DeepWorkSessionManager.groundTruthProvider = {
+            try {
+                (windows.firstOrNull { it.isActive } ?: windows.firstOrNull { it.isFocused })
+                    ?.root?.packageName?.toString()
+            } catch (_: Exception) {
+                null
+            }
+        }
     }
 
     private fun configureServiceInfo() {
@@ -207,76 +189,9 @@ class BlockerAccessibilityService : AccessibilityService() {
                     null
                 }
                 val isExemptWindowType = windowType != null && windowType in DEEP_WORK_EXEMPT_WINDOW_TYPES
-
-                // HiOS (and some other OEM skins) fire spurious launcher-package
-                // events during WebView content transitions — most commonly when
-                // AnkiDroid renders "Show Answer" in its embedded WebView. The
-                // event makes it look like the user navigated to the home screen
-                // when they haven't moved at all.
-                //
-                // Guard: if the package is a known launcher AND the primary app's
-                // window is still visible in the live accessibility window stack,
-                // this is a phantom event — discard it. If the user genuinely
-                // pressed Home the primary app's window will be gone and the
-                // check fails, so a real departure still triggers a pause normally.
-                val isPhantomLauncherEvent = !isExemptWindowType
-                    && packageName in LAUNCHER_PACKAGES_NEEDING_WEBVIEW_GUARD
-                    && run {
-                        val primaryPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager
-                            .state.value.primaryAppPackage
-                        primaryPkg != null && try {
-                            windows.any { w -> w.root?.packageName?.toString() == primaryPkg }
-                        } catch (_: Exception) { false }
-                    }
-
-                // ── Wire into the existing in-app debug capture system ────────
-                // Arm a capture from the Debug Capture screen, then tap "Show
-                // Answer" in AnkiDroid. Every TYPE_WINDOW_STATE_CHANGED during
-                // an active session is recorded with the full live window stack
-                // and a decision label (FORWARDED / PHANTOM-SWALLOWED /
-                // EXEMPT-WINTYPE), so you can see HiOS Launcher and AnkiDroid
-                // appearing side-by-side in the same snapshot and confirm the
-                // phantom guard is firing correctly.
-                if (devs.org.ultrafocus.utils.DeepWorkSessionManager.hasActiveSession() &&
-                    devs.org.ultrafocus.utils.DebugCaptureManager.isCaptureArmed(this)) {
-
-                    val windowStack = try {
-                        windows.map { w ->
-                            val pkg  = w.root?.packageName?.toString() ?: "null"
-                            val type = when (w.type) {
-                                AccessibilityWindowInfo.TYPE_APPLICATION          -> "APP"
-                                AccessibilityWindowInfo.TYPE_INPUT_METHOD         -> "IME"
-                                AccessibilityWindowInfo.TYPE_SYSTEM               -> "SYS"
-                                AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> "A11Y"
-                                AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER -> "SPLIT"
-                                else -> "t${w.type}"
-                            }
-                            "$pkg($type)"
-                        }
-                    } catch (_: Exception) { emptyList() }
-
-                    val decision = when {
-                        isExemptWindowType     -> "EXEMPT-WINTYPE"
-                        isPhantomLauncherEvent -> "PHANTOM-SWALLOWED"
-                        else                   -> "FORWARDED"
-                    }
-
-                    devs.org.ultrafocus.utils.DebugCaptureManager.record(
-                        context     = this,
-                        packageName = packageName,
-                        eventType   = event.eventType,
-                        className   = className,
-                        windowCount = windowStack.size,
-                        rootClasses = windowStack,   // full live stack, one entry per window
-                        note        = "DW:$decision"
-                    )
-                }
-
-                if (!isPhantomLauncherEvent) {
-                    devs.org.ultrafocus.utils.DeepWorkSessionManager.onForegroundAppChanged(
-                        packageName, className, isExemptWindowType
-                    )
-                }
+                devs.org.ultrafocus.utils.DeepWorkSessionManager.onForegroundAppChanged(
+                    packageName, className, isExemptWindowType
+                )
             } catch (_: Exception) {}
         }
 
@@ -741,5 +656,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         serviceScope.cancel()
         isServiceReady = false
         currentlyBlockedApps.clear()
+        devs.org.ultrafocus.utils.DeepWorkSessionManager.groundTruthProvider = null
     }
 }
