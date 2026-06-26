@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/background"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingBottom="32dp"
+        tools:context=".activities.LeaderboardActivity">
+
+        <com.google.android.material.appbar.MaterialToolbar
+            android:id="@+id/toolbar"
+            android:layout_width="match_parent"
+            android:layout_height="?attr/actionBarSize"
+            android:background="@color/background"
+            app:title="Monthly Leaderboard"
+            app:titleTextColor="@color/text_primary"
+            app:navigationIcon="@drawable/ic_arrow_back" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="20dp"
+            android:layout_marginTop="2dp"
+            android:layout_marginBottom="14dp"
+            android:text="Your months ranked by quality-adjusted focus output."
+            android:textSize="13sp"
+            android:textColor="@color/text_secondary" />
+
+        <!-- EFM explanation card -->
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="16dp"
+            android:layout_marginBottom="16dp"
+            app:cardBackgroundColor="@color/surface_variant"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp"
+            app:strokeWidth="0dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingHorizontal="14dp"
+                android:paddingVertical="10dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="EFM = Effective Focus Minutes"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/text_primary"
+                    android:layout_marginBottom="3dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Quality-adjusted output: sum of (focus score ÷ 100) × focused minutes, per session. Same clock-hours with more breaks = lower EFM."
+                    android:textSize="12sp"
+                    android:textColor="@color/text_secondary" />
+
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Column header row — hidden until data loads -->
+        <LinearLayout
+            android:id="@+id/layoutHeader"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginHorizontal="16dp"
+            android:paddingHorizontal="14dp"
+            android:paddingBottom="6dp"
+            android:visibility="gone"
+            tools:visibility="visible">
+
+            <TextView
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="RNK"
+                android:textSize="10sp"
+                android:textStyle="bold"
+                android:textColor="@color/text_hint"
+                android:letterSpacing="0.08" />
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="MONTH"
+                android:textSize="10sp"
+                android:textStyle="bold"
+                android:textColor="@color/text_hint"
+                android:letterSpacing="0.08" />
+
+            <TextView
+                android:layout_width="64dp"
+                android:layout_height="wrap_content"
+                android:gravity="end"
+                android:text="EFM"
+                android:textSize="10sp"
+                android:textStyle="bold"
+                android:textColor="@color/text_hint"
+                android:letterSpacing="0.08" />
+
+            <TextView
+                android:layout_width="76dp"
+                android:layout_height="wrap_content"
+                android:gravity="end"
+                android:text="FOCUSED"
+                android:textSize="10sp"
+                android:textStyle="bold"
+                android:textColor="@color/text_hint"
+                android:letterSpacing="0.08" />
+
+        </LinearLayout>
+
+        <!-- Empty state -->
+        <TextView
+            android:id="@+id/txtEmpty"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="20dp"
+            android:layout_marginTop="40dp"
+            android:gravity="center"
+            android:text="No completed sessions yet.\nFinish a session to see your monthly leaderboard."
+            android:textSize="14sp"
+            android:lineSpacingExtra="4dp"
+            android:textColor="@color/text_hint"
+            android:visibility="gone"
+            tools:visibility="visible" />
+
+        <!-- Leaderboard rows -->
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/recyclerLeaderboard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="16dp"
+            android:nestedScrollingEnabled="false"
+            android:visibility="gone"
+            tools:listitem="@layout/monthly_stats_item" />
+
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

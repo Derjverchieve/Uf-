@@ -29,6 +29,10 @@ interface FocusSessionDao {
     @Query("SELECT * FROM FocusSession WHERE status = 'COMPLETED' AND startTime BETWEEN :start AND :end ORDER BY startTime DESC")
     suspend fun getCompletedBetween(start: Long, end: Long): List<FocusSession>
 
+    // All completed sessions ordered oldest-first, for monthly aggregation.
+    @Query("SELECT * FROM FocusSession WHERE status = 'COMPLETED' ORDER BY startTime ASC")
+    suspend fun getAllCompleted(): List<FocusSession>
+
     @Query("DELETE FROM FocusSession WHERE id = :id")
     suspend fun deleteById(id: Long)
 }

@@ -164,6 +164,50 @@
                         android:textSize="12sp"/>
                 </LinearLayout>
 
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginVertical="12dp"
+                    android:background="@color/card_stroke" />
+
+                <!-- Kiosk mode shortcut -->
+                <LinearLayout
+                    android:id="@+id/rowKioskSetup"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:background="?attr/selectableItemBackground"
+                    android:paddingVertical="6dp">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_weight="1"
+                        android:layout_height="wrap_content"
+                        android:text="Kiosk mode"
+                        android:textSize="14sp"
+                        android:textColor="@color/text_primary" />
+
+                    <TextView
+                        android:id="@+id/txtKioskStatus"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Off"
+                        android:textSize="13sp"
+                        android:textColor="@color/text_secondary"
+                        android:layout_marginEnd="4dp" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="→"
+                        android:textSize="16sp"
+                        android:textColor="@color/primary" />
+
+                </LinearLayout>
+
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnStartSession"
                     android:layout_width="match_parent"
@@ -399,17 +443,96 @@
                 tools:listitem="@layout/pause_event_item"/>
         </LinearLayout>
 
-        <!-- ── History ──────────────────────────────────────────────────── -->
-        <TextView
-            android:layout_width="wrap_content"
+        <!-- ── Monthly Leaderboard shortcut ────────────────────────────────── -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/rowLeaderboard"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginHorizontal="16dp"
+            android:layout_marginBottom="20dp"
+            android:clickable="true"
+            android:focusable="true"
+            app:cardBackgroundColor="@color/surface"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp"
+            app:strokeColor="@color/card_stroke"
+            app:strokeWidth="1dp"
+            app:rippleColor="?attr/colorControlHighlight">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingHorizontal="16dp"
+                android:paddingVertical="14dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Monthly Leaderboard"
+                        android:textSize="14sp"
+                        android:textStyle="bold"
+                        android:textColor="@color/text_primary" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="1dp"
+                        android:text="Your months ranked by quality-adjusted focus"
+                        android:textSize="12sp"
+                        android:textColor="@color/text_secondary" />
+
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="→"
+                    android:textSize="18sp"
+                    android:textColor="@color/primary"
+                    android:layout_marginStart="8dp" />
+
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- ── History ──────────────────────────────────────────────────── -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
             android:layout_marginHorizontal="20dp"
-            android:layout_marginBottom="6dp"
-            android:text="RECENT SESSIONS"
-            android:textSize="11sp"
-            android:letterSpacing="0.12"
-            android:textColor="@color/text_hint"
-            android:textStyle="bold"/>
+            android:layout_marginBottom="6dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="RECENT SESSIONS"
+                android:textSize="11sp"
+                android:letterSpacing="0.12"
+                android:textColor="@color/text_hint"
+                android:textStyle="bold"/>
+
+            <TextView
+                android:id="@+id/txtExportCsv"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Export CSV"
+                android:textSize="12sp"
+                android:textColor="@color/primary"
+                android:padding="4dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackground"/>
+        </LinearLayout>
 
         <TextView
             android:id="@+id/txtNoHistory"

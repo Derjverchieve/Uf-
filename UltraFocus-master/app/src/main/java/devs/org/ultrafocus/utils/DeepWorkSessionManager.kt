@@ -283,6 +283,33 @@ object DeepWorkSessionManager {
 
     fun cancelSession() = finalizeSession(SessionStatus.CANCELLED)
 
+    // ── Physical-presence callbacks (called by FacePresenceDetector via DeepWorkSessionService) ──
+
+    /**
+     * Face detected again after an AUTO_AWAY absence — auto-resume ONLY if the
+     * pause was caused by face-absence. APP_SWITCH and MANUAL pauses require their
+     * own specific actions to clear and must never be overridden by the camera.
+     */
+    fun onFacePresent() {
+        if (_state.value.phase != SessionPhase.PAUSED) return
+        val open = openPauseEvent ?: return
+        if (open.reason != PauseReason.AUTO_AWAY) return
+        closeCurrentPause(System.currentTimeMillis())
+    }
+
+    /**
+     * No face detected for the full grace period — auto-pause if currently
+     * RUNNING. If already paused for any other reason, leave that reason intact.
+     * Also cancels any pending app-leave grace: you can't simultaneously be
+     * "switching away from the app" and "walking away from the screen".
+     */
+    fun onFaceAbsent() {
+        if (_state.value.phase != SessionPhase.RUNNING) return
+        currentSession ?: return
+        graceJob?.cancel(); graceJob = null
+        openNewPause(System.currentTimeMillis(), PauseReason.AUTO_AWAY, appPackage = null, appName = "Away from screen")
+    }
+
     // ── Called from BlockerAccessibilityService on every foreground-app change ──
 
     fun onForegroundAppChanged(packageName: String, className: String? = null, isExemptWindowType: Boolean = false) {

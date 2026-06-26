@@ -26,9 +26,11 @@ import devs.org.ultrafocus.model.SessionStatus
 import devs.org.ultrafocus.repository.DeepWorkRepository
 import devs.org.ultrafocus.services.DeepWorkSessionService
 import devs.org.ultrafocus.utils.DeepWorkPrefs
+import devs.org.ultrafocus.utils.DeepWorkExportManager
 import devs.org.ultrafocus.utils.DeepWorkSessionManager
 import devs.org.ultrafocus.utils.DurationFormatter
 import devs.org.ultrafocus.utils.FocusScoreCalculator
+import devs.org.ultrafocus.utils.KioskPrefs
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
@@ -42,6 +44,22 @@ class DeepWorkSessionActivity : AppCompatActivity() {
     // logic) — this satisfies that.
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* no-op either way */ }
+
+    private val cameraPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* face detection activates on next session start */ }
+
+    private val exportLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        uri?.let {
+            val ok = DeepWorkExportManager.exportSessionsCsv(this, it)
+            Toast.makeText(
+                this,
+                if (ok) "Exported." else "Export failed.",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
 
     private var selectedAppPackage: String? = null
     private var selectedAppName: String? = null
@@ -132,6 +150,18 @@ class DeepWorkSessionActivity : AppCompatActivity() {
         binding.btnPreset45.setOnClickListener { binding.inputTargetMinutes.setText("45") }
         binding.btnPreset60.setOnClickListener { binding.inputTargetMinutes.setText("60") }
         binding.btnPreset90.setOnClickListener { binding.inputTargetMinutes.setText("90") }
+
+        binding.txtExportCsv.setOnClickListener {
+            exportLauncher.launch("ultrafocus_deep_work_sessions.csv")
+        }
+
+        binding.rowLeaderboard.setOnClickListener {
+            startActivity(Intent(this, LeaderboardActivity::class.java))
+        }
+
+        binding.rowKioskSetup.setOnClickListener {
+            startActivity(Intent(this, KioskSetupActivity::class.java))
+        }
 
         binding.btnStartSession.setOnClickListener { startSessionFromInputs() }
 
@@ -279,10 +309,7 @@ class DeepWorkSessionActivity : AppCompatActivity() {
             repository.observePauseEventsForSession(sessionId).collectLatest { events ->
                 val rows = events.sortedByDescending { it.startTime }.map {
                     PauseRow(
-                        label = buildString {
-                            append(it.appName ?: "Manual pause")
-                            if (!it.appPackage.isNullOrBlank()) append("\n${it.appPackage}")
-                        },
+                        label = it.appName ?: "Manual pause",
                         durationMs = it.durationMs,
                         ongoing = it.endTime == null
                     )
@@ -329,6 +356,18 @@ class DeepWorkSessionActivity : AppCompatActivity() {
                 binding.txtNoHistory.visibility =
                     if (finished.isEmpty()) android.view.View.VISIBLE else android.view.View.GONE
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Keep kiosk status label in sync when returning from KioskSetupActivity
+        binding.txtKioskStatus.text = if (KioskPrefs.isKioskEnabled(this)) "On" else "Off"
+        // Camera permission — needed for face-presence auto-pause.
+        // Request once silently; user can re-prompt from system settings if denied.
+        if (android.content.pm.PackageManager.PERMISSION_GRANTED !=
+            checkSelfPermission(android.Manifest.permission.CAMERA)) {
+            cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
         }
     }
 

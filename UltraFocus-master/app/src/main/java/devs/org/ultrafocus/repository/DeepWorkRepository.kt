@@ -19,6 +19,9 @@ class DeepWorkRepository(private val db: AppDatabase) {
     suspend fun getCompletedSessionsBetween(start: Long, end: Long): List<FocusSession> =
         sessionDao.getCompletedBetween(start, end)
 
+    // All completed sessions, for monthly leaderboard aggregation.
+    suspend fun getAllCompletedSessions(): List<FocusSession> = sessionDao.getAllCompleted()
+
     // ── Pause events ─────────────────────────────────────────────────────
     suspend fun insertPauseEvent(event: PauseEvent): Long = pauseDao.insert(event)
     suspend fun updatePauseEvent(event: PauseEvent) = pauseDao.update(event)

@@ -4,5 +4,6 @@
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews"
     android:canRetrieveWindowContent="true"
+    android:canRequestFilterKeyEvents="true"
     android:description="@string/accessibility_permission_app_blocker"
     android:label="@string/app_name" />

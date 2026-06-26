@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -15,6 +16,8 @@ import devs.org.ultrafocus.activities.SoftBlockActivity
 import devs.org.ultrafocus.database.AppDatabase
 import devs.org.ultrafocus.repository.AppRepository
 import devs.org.ultrafocus.utils.ContentBlockManager
+import devs.org.ultrafocus.utils.KioskOverlayManager
+import devs.org.ultrafocus.utils.KioskPrefs
 import devs.org.ultrafocus.utils.SoftBlockManager
 import devs.org.ultrafocus.utils.SpecificScreenManager
 import devs.org.ultrafocus.utils.TemporaryAccessManager
@@ -94,6 +97,7 @@ class BlockerAccessibilityService : AccessibilityService() {
     private lateinit var appRepository: AppRepository
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var isServiceReady = false
+    private lateinit var kioskOverlayManager: KioskOverlayManager
 
     private val currentlyBlockedApps = mutableSetOf<String>()
     private var blockedAppInfos: List<devs.org.ultrafocus.model.AppInfo> = emptyList()
@@ -133,6 +137,8 @@ class BlockerAccessibilityService : AccessibilityService() {
                 null
             }
         }
+
+        kioskOverlayManager = KioskOverlayManager(this)
     }
 
     private fun configureServiceInfo() {
@@ -147,7 +153,8 @@ class BlockerAccessibilityService : AccessibilityService() {
             flags = flags or
                 AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                 AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
-                AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
+                AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
+                AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
         }
     }
 
@@ -197,7 +204,18 @@ class BlockerAccessibilityService : AccessibilityService() {
 
         if (packageName == this.packageName) return
 
-        // ── Preview‑page detection (immediate text trigger + delayed scan) ──
+        // ── Kiosk mode: block any app not on the allowed list immediately ─────
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            KioskPrefs.isKioskEnabled(this)) {
+            val sessionPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager
+                .state.value.primaryAppPackage
+            val allowed = KioskPrefs.getAllowedPackages(this) + setOfNotNull(sessionPkg)
+            if (packageName !in allowed) {
+                performBlock(packageName)
+                return
+            }
+            // Allowed app — falls through to normal website/content blocking below
+        }
         if (browserPackages.contains(packageName) &&
             event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
 
@@ -650,12 +668,30 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {}
 
+    /**
+     * Volume key press → show the kiosk quick-switch tile (if kiosk is active).
+     * Always returns false so the system still processes the volume change normally.
+     */
+    override fun onKeyEvent(event: KeyEvent?): Boolean {
+        if (event != null &&
+            event.action == KeyEvent.ACTION_DOWN &&
+            KioskPrefs.isKioskEnabled(this) &&
+            (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+             event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
+            val sessionPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager
+                .state.value.primaryAppPackage
+            kioskOverlayManager.show(alwaysIncludePkg = sessionPkg)
+        }
+        return false // never consume — volume still changes
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         previewClickJob?.cancel()
         serviceScope.cancel()
         isServiceReady = false
         currentlyBlockedApps.clear()
+        if (::kioskOverlayManager.isInitialized) kioskOverlayManager.destroy()
         devs.org.ultrafocus.utils.DeepWorkSessionManager.groundTruthProvider = null
     }
 }

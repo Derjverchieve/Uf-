@@ -17,6 +17,7 @@ import devs.org.ultrafocus.model.PauseReason
 import devs.org.ultrafocus.model.SessionPhase
 import devs.org.ultrafocus.utils.DeepWorkSessionManager
 import devs.org.ultrafocus.utils.DurationFormatter
+import devs.org.ultrafocus.utils.FacePresenceDetector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,6 +47,8 @@ class DeepWorkSessionService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var observeJob: Job? = null
+    private var faceDetector: FacePresenceDetector? = null
+    private var sessionActive = false
 
     override fun onCreate() {
         super.onCreate()
@@ -105,13 +108,39 @@ class DeepWorkSessionService : Service() {
         observeJob = serviceScope.launch {
             DeepWorkSessionManager.state.collectLatest { state ->
                 if (state.phase == SessionPhase.IDLE) {
+                    if (sessionActive) {
+                        stopFaceDetector()
+                        sessionActive = false
+                    }
                     stopForegroundCompat()
                     stopSelf()
                 } else {
+                    if (!sessionActive) {
+                        sessionActive = true
+                        startFaceDetector()
+                    }
                     notificationManager().notify(NOTIFICATION_ID, buildNotification())
                 }
             }
         }
+    }
+
+    private fun startFaceDetector() {
+        if (checkSelfPermission(android.Manifest.permission.CAMERA) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED) return
+        if (faceDetector != null) return
+        faceDetector = FacePresenceDetector(
+            context = this,
+            absentGraceMs = 10_000L,
+            onFacePresent = { DeepWorkSessionManager.onFacePresent() },
+            onFaceAbsent = { DeepWorkSessionManager.onFaceAbsent() }
+        )
+        faceDetector?.start()
+    }
+
+    private fun stopFaceDetector() {
+        faceDetector?.stop()
+        faceDetector = null
     }
 
     private fun notificationManager() = getSystemService(NotificationManager::class.java)
@@ -229,6 +258,7 @@ class DeepWorkSessionService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         DeepWorkSessionManager.onTargetReached = null
+        stopFaceDetector()
         observeJob?.cancel()
         serviceScope.cancel()
     }
