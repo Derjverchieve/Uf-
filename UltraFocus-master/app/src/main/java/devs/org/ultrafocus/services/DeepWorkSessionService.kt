@@ -131,7 +131,7 @@ class DeepWorkSessionService : Service() {
         if (faceDetector != null) return
         faceDetector = FacePresenceDetector(
             context = this,
-            absentGraceMs = 10_000L,
+            absentGraceMs = 5_000L,
             onFacePresent = { DeepWorkSessionManager.onFacePresent() },
             onFaceAbsent = { DeepWorkSessionManager.onFaceAbsent() }
         )

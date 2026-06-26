@@ -377,11 +377,22 @@ class DeepWorkSessionActivity : AppCompatActivity() {
             return
         }
         val pauses = repository.getPauseEventsForSession(session.id)
-        val breakdown = pauses.filter { it.appPackage != null }
-            .groupBy { it.appPackage }
-            .map { (pkg, evts) ->
+        val breakdown = pauses
+            .groupBy { pause ->
+                pause.appPackage ?: when {
+                    !pause.appName.isNullOrBlank() -> pause.appName
+                    pause.reason == PauseReason.MANUAL -> "Manual pause"
+                    else -> pause.reason.name.lowercase()
+                        .replaceFirstChar { it.uppercase() }.replace('_', ' ')
+                }
+            }
+            .map { (_, evts) ->
+                val label = evts.firstOrNull { !it.appName.isNullOrBlank() }?.appName
+                    ?: if (evts.first().reason == PauseReason.MANUAL) "Manual pause"
+                    else evts.first().reason.name.lowercase()
+                        .replaceFirstChar { it.uppercase() }.replace('_', ' ')
                 PauseRow(
-                    label = evts.firstOrNull { !it.appName.isNullOrBlank() }?.appName ?: pkg!!,
+                    label = label,
                     durationMs = evts.sumOf { it.durationMs }
                 )
             }

@@ -13,6 +13,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import devs.org.ultrafocus.R
+import devs.org.ultrafocus.model.SessionPhase
 
 /**
  * Manages the kiosk quick-switch overlay — a floating row of app icons drawn
@@ -28,6 +29,7 @@ class KioskOverlayManager(private val context: Context) {
         context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val mainHandler = Handler(Looper.getMainLooper())
     private var overlayView: View? = null
+    private var timerTickRunnable: Runnable? = null
 
     private val hideRunnable = Runnable { hide() }
 
@@ -78,18 +80,44 @@ class KioskOverlayManager(private val context: Context) {
         try {
             windowManager.addView(view, params)
             overlayView = view
+            startTimerTicker(view.findViewById(R.id.kioskTimerText))
             mainHandler.postDelayed(hideRunnable, AUTO_HIDE_MS)
         } catch (_: Exception) {}
     }
 
     fun hide() {
         mainHandler.removeCallbacks(hideRunnable)
+        timerTickRunnable?.let { mainHandler.removeCallbacks(it) }
+        timerTickRunnable = null
         val view = overlayView ?: return
         try { windowManager.removeView(view) } catch (_: Exception) {}
         overlayView = null
     }
 
     fun destroy() = hide()
+
+    private fun startTimerTicker(timerText: TextView) {
+        timerTickRunnable?.let { mainHandler.removeCallbacks(it) }
+        val ticker = object : Runnable {
+            override fun run() {
+                if (overlayView == null) return
+                val state = DeepWorkSessionManager.state.value
+                timerText.text = when {
+                    state.phase == SessionPhase.IDLE -> ""
+                    state.targetDurationMs <= 0L ->
+                        DurationFormatter.formatClock(state.focusedTimeMs)
+                    else -> {
+                        val remaining = state.targetDurationMs - state.focusedTimeMs
+                        if (remaining > 0L) "${DurationFormatter.formatClock(remaining)} left"
+                        else "+${DurationFormatter.formatClock(-remaining)} overtime"
+                    }
+                }
+                mainHandler.postDelayed(this, 1_000L)
+            }
+        }
+        timerTickRunnable = ticker
+        mainHandler.post(ticker)
+    }
 
     private fun addAppIcon(container: LinearLayout, packageName: String, label: String) {
         val pm = context.packageManager

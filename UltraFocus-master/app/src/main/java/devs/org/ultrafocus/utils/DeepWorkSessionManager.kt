@@ -587,15 +587,26 @@ object DeepWorkSessionManager {
         }
     }
 
+    private fun labelFor(pause: PauseEvent): String = when {
+        !pause.appName.isNullOrBlank() -> pause.appName
+        pause.reason == PauseReason.MANUAL -> "Manual pause"
+        else -> pause.reason.name.lowercase()
+            .replaceFirstChar { it.uppercase() }.replace('_', ' ')
+    }
+
     private suspend fun buildSummary(session: FocusSession, status: SessionStatus, now: Long): SessionSummary {
         val pauses = repository.getPauseEventsForSession(session.id)
+
+        // Group by package name for app-switch pauses, or by a human label for
+        // null-package pauses (AUTO_AWAY = "Away from screen", MANUAL = "Manual pause",
+        // screen-off = "Screen off"). Previously filtered to appPackage != null,
+        // which silently dropped all physical-absence pauses from the breakdown.
         val breakdown = pauses
-            .filter { it.appPackage != null }
-            .groupBy { it.appPackage }
-            .map { (pkg, events) ->
+            .groupBy { it.appPackage ?: labelFor(it) }
+            .map { (_, events) ->
                 AppBreakItem(
-                    appPackage = pkg!!,
-                    appName = events.firstOrNull { !it.appName.isNullOrBlank() }?.appName ?: pkg,
+                    appPackage = events.first().appPackage ?: labelFor(events.first()),
+                    appName = labelFor(events.first()),
                     totalMs = events.sumOf { it.durationMs },
                     count = events.size
                 )

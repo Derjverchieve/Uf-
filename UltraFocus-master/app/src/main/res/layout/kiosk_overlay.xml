@@ -1,16 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
-<HorizontalScrollView
+<LinearLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="wrap_content"
     android:layout_height="wrap_content"
-    android:scrollbars="none"
-    android:background="@drawable/kiosk_overlay_bg">
+    android:orientation="vertical"
+    android:gravity="center_horizontal"
+    android:background="@drawable/kiosk_overlay_bg"
+    android:paddingTop="10dp"
+    android:paddingBottom="4dp">
 
-    <LinearLayout
-        android:id="@+id/kioskAppContainer"
+    <!-- Session countdown — populated by KioskOverlayManager ticker -->
+    <TextView
+        android:id="@+id/kioskTimerText"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:paddingHorizontal="4dp" />
+        android:layout_marginBottom="4dp"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:textColor="#FFFFFFFF"
+        android:letterSpacing="0.02"/>
 
-</HorizontalScrollView>
+    <HorizontalScrollView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:id="@+id/kioskAppContainer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingHorizontal="4dp" />
+
+    </HorizontalScrollView>
+
+</LinearLayout>
