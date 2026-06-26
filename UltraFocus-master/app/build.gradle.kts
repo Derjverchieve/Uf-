@@ -71,4 +71,11 @@ dependencies {
 
     //coroutine
     implementation(libs.kotlinx.coroutines.android)
+
+    // CameraX
+implementation("androidx.camera:camera-camera2:1.3.4")
+implementation("androidx.camera:camera-lifecycle:1.3.4")
+
+// ML Kit face detection
+implementation("com.google.mlkit:face-detection:16.1.7")
 }
