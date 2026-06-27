@@ -3,6 +3,7 @@ package devs.org.ultrafocus.utils
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
@@ -30,6 +31,89 @@ class KioskOverlayManager(private val context: Context) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var overlayView: View? = null
     private var timerTickRunnable: Runnable? = null
+
+    // ── Persistent corner timer ───────────────────────────────────────────────
+    // A small non-interactive pill in the top-right corner showing the session
+    // countdown while kiosk mode is active. Managed by BlockerAccessibilityService
+    // via showPersistentTimer / hidePersistentTimer.
+
+    private var persistentTimerView: TextView? = null
+    private var persistentTimerRunnable: Runnable? = null
+
+    fun showPersistentTimer() {
+        if (persistentTimerView != null) return // already showing
+
+        val density = context.resources.displayMetrics.density
+        val pill = TextView(context).apply {
+            textSize = 12f
+            setTextColor(0xFFFFFFFF.toInt())
+            setPadding(
+                (14 * density).toInt(), (6 * density).toInt(),
+                (14 * density).toInt(), (6 * density).toInt()
+            )
+            background = GradientDrawable().apply {
+                setColor(0xE0101018.toInt())
+                cornerRadius = 24 * density
+            }
+            text = "🔒 --:--"
+        }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = (16 * density).toInt()
+            y = (80 * density).toInt()
+        }
+
+        try {
+            windowManager.addView(pill, params)
+            persistentTimerView = pill
+            startPersistentTicker(pill)
+        } catch (_: Exception) {}
+    }
+
+    fun hidePersistentTimer() {
+        persistentTimerRunnable?.let { mainHandler.removeCallbacks(it) }
+        persistentTimerRunnable = null
+        persistentTimerView?.let {
+            try { windowManager.removeView(it) } catch (_: Exception) {}
+        }
+        persistentTimerView = null
+    }
+
+    private fun startPersistentTicker(pill: TextView) {
+        persistentTimerRunnable?.let { mainHandler.removeCallbacks(it) }
+        val ticker = object : Runnable {
+            override fun run() {
+                if (persistentTimerView == null) return
+                val state = DeepWorkSessionManager.state.value
+                if (state.phase == SessionPhase.IDLE) {
+                    hidePersistentTimer()
+                    return
+                }
+                val timeStr = when {
+                    state.targetDurationMs <= 0L ->
+                        DurationFormatter.formatClock(state.focusedTimeMs)
+                    else -> {
+                        val remaining = state.targetDurationMs - state.focusedTimeMs
+                        if (remaining > 0L) DurationFormatter.formatClock(remaining)
+                        else "+${DurationFormatter.formatClock(-remaining)}"
+                    }
+                }
+                pill.text = "🔒 $timeStr"
+                mainHandler.postDelayed(this, 1_000L)
+            }
+        }
+        persistentTimerRunnable = ticker
+        mainHandler.post(ticker)
+    }
 
     private val hideRunnable = Runnable { hide() }
 
@@ -94,7 +178,10 @@ class KioskOverlayManager(private val context: Context) {
         overlayView = null
     }
 
-    fun destroy() = hide()
+    fun destroy() {
+        hide()
+        hidePersistentTimer()
+    }
 
     private fun startTimerTicker(timerText: TextView) {
         timerTickRunnable?.let { mainHandler.removeCallbacks(it) }

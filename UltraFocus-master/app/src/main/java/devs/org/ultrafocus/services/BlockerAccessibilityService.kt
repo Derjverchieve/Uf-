@@ -18,6 +18,7 @@ import devs.org.ultrafocus.repository.AppRepository
 import devs.org.ultrafocus.utils.ContentBlockManager
 import devs.org.ultrafocus.utils.KioskOverlayManager
 import devs.org.ultrafocus.utils.KioskPrefs
+import devs.org.ultrafocus.model.SessionPhase
 import devs.org.ultrafocus.utils.SoftBlockManager
 import devs.org.ultrafocus.utils.SpecificScreenManager
 import devs.org.ultrafocus.utils.TemporaryAccessManager
@@ -65,8 +66,9 @@ class BlockerAccessibilityService : AccessibilityService() {
     private val chromePreviewIds = listOf(
         "com.android.chrome:id/ephemeral_tab_view",
         "com.android.chrome:id/preview_tab_view",
-        "com.android.chrome:id/tab_modal",
-        "com.android.chrome:id/open_new_tab_chip"
+        "com.android.chrome:id/tab_modal"
+        // open_new_tab_chip intentionally removed: it matches the "new tab" button and
+        // caused the preview blocker to fire every time the user opened a new tab.
     )
 
     private val chromeTabSwitcherIds = listOf(
@@ -139,6 +141,19 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
 
         kioskOverlayManager = KioskOverlayManager(this)
+
+        // Persistent corner timer: shows lock icon + countdown whenever kiosk
+        // and an active session are both running at the same time.
+        serviceScope.launch {
+            devs.org.ultrafocus.utils.DeepWorkSessionManager.state.collectLatest { state ->
+                if (KioskPrefs.isKioskEnabled(this@BlockerAccessibilityService) &&
+                    state.phase != SessionPhase.IDLE) {
+                    kioskOverlayManager.showPersistentTimer()
+                } else {
+                    kioskOverlayManager.hidePersistentTimer()
+                }
+            }
+        }
     }
 
     private fun configureServiceInfo() {
@@ -207,14 +222,27 @@ class BlockerAccessibilityService : AccessibilityService() {
         // ── Kiosk mode: block any app not on the allowed list immediately ─────
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             KioskPrefs.isKioskEnabled(this)) {
-            val sessionPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager
-                .state.value.primaryAppPackage
-            val allowed = KioskPrefs.getAllowedPackages(this) + setOfNotNull(sessionPkg)
-            if (packageName !in allowed) {
-                performBlock(packageName)
-                return
+            // Exempt system-level packages. Without this, the volume panel, IME,
+            // permission dialogs, clipboard toasts, and any other system overlay all
+            // fire TYPE_WINDOW_STATE_CHANGED with a package not in the allowed list
+            // and get blocked immediately — making kiosk completely unusable.
+            val windowType = try {
+                windows.firstOrNull { it.id == event.windowId }?.type
+            } catch (_: Exception) { null }
+            val isSystemOverlay = packageName == "android" ||
+                packageName in contentScanExemptPackages ||
+                (windowType != null && windowType in DEEP_WORK_EXEMPT_WINDOW_TYPES)
+
+            if (!isSystemOverlay) {
+                val sessionPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager
+                    .state.value.primaryAppPackage
+                val allowed = KioskPrefs.getAllowedPackages(this) + setOfNotNull(sessionPkg)
+                if (packageName !in allowed) {
+                    performBlock(packageName)
+                    return
+                }
             }
-            // Allowed app — falls through to normal website/content blocking below
+            // System overlay or allowed app — falls through to normal content blocking
         }
         if (browserPackages.contains(packageName) &&
             event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
@@ -539,7 +567,10 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     private fun containsPreviewTrigger(text: String): Boolean {
         val norm = text.lowercase()
-        return norm.contains("preview page") || norm.contains("open preview") || norm.contains("preview")
+        // Deliberately narrow: only match explicit preview-page labels.
+        // The old bare norm.contains("preview") caused new-tab pages and any
+        // element with the word "preview" (e.g. image previews) to fire the blocker.
+        return norm.contains("preview page") || norm.contains("open preview")
     }
 
     private fun findPreviewTriggerFromNode(node: AccessibilityNodeInfo?): Boolean {
@@ -691,7 +722,10 @@ class BlockerAccessibilityService : AccessibilityService() {
         serviceScope.cancel()
         isServiceReady = false
         currentlyBlockedApps.clear()
-        if (::kioskOverlayManager.isInitialized) kioskOverlayManager.destroy()
+        if (::kioskOverlayManager.isInitialized) {
+            kioskOverlayManager.hidePersistentTimer()
+            kioskOverlayManager.destroy()
+        }
         devs.org.ultrafocus.utils.DeepWorkSessionManager.groundTruthProvider = null
     }
 }
