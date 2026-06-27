@@ -283,26 +283,42 @@ class BlockerAccessibilityService : AccessibilityService() {
         if (browserPackages.contains(packageName) &&
             event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
 
-            val root = rootInActiveWindow
+            // Guard: AnkiDroid's WebView (and other apps embedding WebView) fire
+            // TYPE_VIEW_CLICKED with packageName = "com.android.chrome" because the
+            // system WebView is implemented by Chrome. If Chrome is not actually the
+            // active window, these are false events — discard immediately.
+            val activeRoot = rootInActiveWindow
+            if (activeRoot == null || activeRoot.packageName?.toString() != packageName) return
 
             // Immediate text check: "Preview page" anywhere → block instantly
-            if (root != null && findPreviewTriggerFromNode(root)) {
+            if (findPreviewTriggerFromNode(activeRoot)) {
                 closePreviewAndExit(packageName)
                 return
             }
 
-            // Delayed scan – only if the click actually opened a preview
+            // Delayed scan — only fires if Chrome is still the active window after
+            // the click settles.
             previewClickJob?.cancel()
             previewClickJob = serviceScope.launch {
                 delay(200)
                 val delayedRoot = rootInActiveWindow ?: return@launch
-                if (delayedRoot.packageName?.toString() == packageName &&
-                    isChromePreview(delayedRoot, packageName)) {
+                if (delayedRoot.packageName?.toString() != packageName) return@launch
+                if (!isChromePreview(delayedRoot, packageName)) return@launch
 
-                    if (scanForBlockedUrls(delayedRoot, packageName) ||
-                        isAnyBlockedHostCurrentlyBlockable(delayedRoot)) {
-                        closePreviewAndExit(packageName)
-                    }
+                // Extra guard: if the address bar is empty or shows a Chrome-internal
+                // URL (new tab page, settings, etc.) this is NOT a real site preview —
+                // the new tab page shows "most visited" tiles that can include blocked
+                // sites and would otherwise trigger a false block.
+                val url = captureBrowserUrl(delayedRoot, packageName)
+                val isInternalPage = url.isNullOrBlank() ||
+                    url.equals("Search or type URL", ignoreCase = true) ||
+                    url.startsWith("chrome://", ignoreCase = true) ||
+                    url.startsWith("about:", ignoreCase = true)
+                if (isInternalPage) return@launch
+
+                if (scanForBlockedUrls(delayedRoot, packageName) ||
+                    isAnyBlockedHostCurrentlyBlockable(delayedRoot)) {
+                    closePreviewAndExit(packageName)
                 }
             }
             return
