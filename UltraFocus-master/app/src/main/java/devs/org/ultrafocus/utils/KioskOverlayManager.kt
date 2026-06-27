@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.ImageView
@@ -38,6 +39,7 @@ class KioskOverlayManager(private val context: Context) {
     // via showPersistentTimer / hidePersistentTimer.
 
     private var persistentTimerView: TextView? = null
+    private var persistentTimerParams: WindowManager.LayoutParams? = null
     private var persistentTimerRunnable: Runnable? = null
 
     fun showPersistentTimer() {
@@ -63,7 +65,6 @@ class KioskOverlayManager(private val context: Context) {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
         ).apply {
@@ -72,9 +73,12 @@ class KioskOverlayManager(private val context: Context) {
             y = (80 * density).toInt()
         }
 
+        pill.setOnTouchListener(makeDragListener(pill, params))
+
         try {
             windowManager.addView(pill, params)
             persistentTimerView = pill
+            persistentTimerParams = params
             startPersistentTicker(pill)
         } catch (_: Exception) {}
     }
@@ -86,6 +90,44 @@ class KioskOverlayManager(private val context: Context) {
             try { windowManager.removeView(it) } catch (_: Exception) {}
         }
         persistentTimerView = null
+        persistentTimerParams = null
+    }
+
+    /**
+     * Touch listener that lets the user drag the timer pill anywhere on screen.
+     * Uses END gravity so x is measured from the right edge inward — the X delta
+     * is therefore inverted relative to raw touch movement.
+     */
+    private fun makeDragListener(
+        view: View,
+        params: WindowManager.LayoutParams
+    ): View.OnTouchListener {
+        var startParamX = 0
+        var startParamY = 0
+        var startTouchX = 0f
+        var startTouchY = 0f
+        return View.OnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    startParamX = params.x
+                    startParamY = params.y
+                    startTouchX = event.rawX
+                    startTouchY = event.rawY
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    // END gravity: moving finger right decreases x (pill moves right)
+                    params.x = (startParamX - (event.rawX - startTouchX)).toInt()
+                    params.y = (startParamY + (event.rawY - startTouchY)).toInt()
+                    // Clamp to non-negative so pill stays on screen
+                    params.x = maxOf(0, params.x)
+                    params.y = maxOf(0, params.y)
+                    try { windowManager.updateViewLayout(view, params) } catch (_: Exception) {}
+                    true
+                }
+                else -> false
+            }
+        }
     }
 
     private fun startPersistentTicker(pill: TextView) {

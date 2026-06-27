@@ -5,8 +5,13 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
+import android.database.ContentObserver
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -101,6 +106,28 @@ class BlockerAccessibilityService : AccessibilityService() {
     private var isServiceReady = false
     private lateinit var kioskOverlayManager: KioskOverlayManager
 
+    /**
+     * Detects volume changes made via the quick-settings slider (or any other method
+     * that changes the actual stream volume — physical buttons, assistant, etc.).
+     * Shows the kiosk quick-switch tile whenever the music stream volume changes.
+     * Registered in onServiceConnected, unregistered in onDestroy.
+     */
+    private val volumeObserver by lazy {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        var lastVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                if (current != lastVolume && KioskPrefs.isKioskEnabled(this@BlockerAccessibilityService)) {
+                    lastVolume = current
+                    val sessionPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager
+                        .state.value.primaryAppPackage
+                    kioskOverlayManager.show(alwaysIncludePkg = sessionPkg)
+                }
+            }
+        }
+    }
+
     private val currentlyBlockedApps = mutableSetOf<String>()
     private var blockedAppInfos: List<devs.org.ultrafocus.model.AppInfo> = emptyList()
 
@@ -141,6 +168,15 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
 
         kioskOverlayManager = KioskOverlayManager(this)
+
+        // Observe actual music-stream volume changes so the quick-switch tile appears
+        // when the user adjusts volume via quick settings, assistant, or any method
+        // other than physical keys (which are handled by onKeyEvent as a fallback).
+        contentResolver.registerContentObserver(
+            Settings.System.CONTENT_URI,
+            true,
+            volumeObserver
+        )
 
         // Persistent corner timer: shows lock icon + countdown whenever kiosk
         // and an active session are both running at the same time.
@@ -700,8 +736,9 @@ class BlockerAccessibilityService : AccessibilityService() {
     override fun onInterrupt() {}
 
     /**
-     * Volume key press → show the kiosk quick-switch tile (if kiosk is active).
-     * Always returns false so the system still processes the volume change normally.
+     * Physical volume key fallback — shows the kiosk tile when hardware buttons work.
+     * The ContentObserver (volumeObserver) handles quick-settings slider changes.
+     * Always returns false so the volume still changes.
      */
     override fun onKeyEvent(event: KeyEvent?): Boolean {
         if (event != null &&
@@ -713,11 +750,12 @@ class BlockerAccessibilityService : AccessibilityService() {
                 .state.value.primaryAppPackage
             kioskOverlayManager.show(alwaysIncludePkg = sessionPkg)
         }
-        return false // never consume — volume still changes
+        return false
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        try { contentResolver.unregisterContentObserver(volumeObserver) } catch (_: Exception) {}
         previewClickJob?.cancel()
         serviceScope.cancel()
         isServiceReady = false

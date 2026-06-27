@@ -65,7 +65,7 @@ class KioskSetupActivity : AppCompatActivity() {
         val labels = apps.map { it.second }.toTypedArray()
 
         MaterialAlertDialogBuilder(this)
-            .setTitle("Add allowed app")
+            .setTitle("Add extra allowed app")
             .setItems(labels) { _, which ->
                 val (pkg, label) = apps[which]
                 KioskPrefs.addAllowedApp(this, pkg, label)
