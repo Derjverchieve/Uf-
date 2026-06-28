@@ -50,6 +50,10 @@
             android:exported="false" />
 
         <activity
+            android:name=".activities.AnalyticsActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".activities.DebugCaptureActivity"
             android:exported="false" />
 

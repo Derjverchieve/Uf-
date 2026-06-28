@@ -142,7 +142,7 @@ class DeepWorkSessionActivity : AppCompatActivity() {
         binding.recyclerBreakdown.layoutManager = LinearLayoutManager(this)
         binding.recyclerBreakdown.adapter = breakdownAdapter
 
-        historyAdapter = SessionHistoryAdapter(emptyList()) { session ->
+        historyAdapter = SessionHistoryAdapter(emptyList<HistoryItem>()) { session ->
             lifecycleScope.launch { showHistorySummary(session) }
         }
         binding.recyclerHistory.layoutManager = LinearLayoutManager(this)
@@ -393,11 +393,57 @@ class DeepWorkSessionActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repository.observeAllSessions().collectLatest { sessions ->
                 val finished = sessions.filter { it.status != SessionStatus.RUNNING }
-                historyAdapter.submitList(finished)
+                val items = buildHistoryItems(finished)
+                historyAdapter.submitList(items)
                 binding.txtNoHistory.visibility =
                     if (finished.isEmpty()) android.view.View.VISIBLE else android.view.View.GONE
             }
         }
+    }
+
+    /**
+     * Groups sessions by calendar date (newest first). Each group is ordered
+     * most-recent-session first, followed by a DaySummaryRow showing the day's
+     * total focused time and session count.
+     */
+    private fun buildHistoryItems(sessions: List<FocusSession>): List<HistoryItem> {
+        if (sessions.isEmpty()) return emptyList()
+
+        val cal = java.util.Calendar.getInstance()
+        val today = java.util.Calendar.getInstance()
+        val yesterday = java.util.Calendar.getInstance().also { it.add(java.util.Calendar.DAY_OF_YEAR, -1) }
+        val dayFmt = java.text.SimpleDateFormat("EEE, MMM d", java.util.Locale.getDefault())
+
+        // Group by (year, dayOfYear), preserve newest-first order
+        val grouped = LinkedHashMap<Pair<Int, Int>, MutableList<FocusSession>>()
+        for (session in sessions.sortedByDescending { it.startTime }) {
+            cal.timeInMillis = session.startTime
+            val key = cal.get(java.util.Calendar.YEAR) to cal.get(java.util.Calendar.DAY_OF_YEAR)
+            grouped.getOrPut(key) { mutableListOf() }.add(session)
+        }
+
+        val result = mutableListOf<HistoryItem>()
+        for ((key, daySessions) in grouped) {
+            // Session rows (newest first within the day)
+            daySessions.forEach { result.add(HistoryItem.SessionRow(it)) }
+
+            // Day summary row
+            cal.set(java.util.Calendar.YEAR, key.first)
+            cal.set(java.util.Calendar.DAY_OF_YEAR, key.second)
+            val label = when {
+                key.first == today.get(java.util.Calendar.YEAR) &&
+                key.second == today.get(java.util.Calendar.DAY_OF_YEAR) -> "Today"
+                key.first == yesterday.get(java.util.Calendar.YEAR) &&
+                key.second == yesterday.get(java.util.Calendar.DAY_OF_YEAR) -> "Yesterday"
+                else -> dayFmt.format(cal.time)
+            }
+            result.add(HistoryItem.DaySummaryRow(
+                dateLabel = label,
+                totalFocusedMs = daySessions.sumOf { it.focusedTimeMs },
+                sessionCount = daySessions.size
+            ))
+        }
+        return result
     }
 
     override fun onResume() {
