@@ -283,32 +283,47 @@ class BlockerAccessibilityService : AccessibilityService() {
         if (browserPackages.contains(packageName) &&
             event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
 
-            // Guard: AnkiDroid's WebView (and other apps embedding WebView) fire
-            // TYPE_VIEW_CLICKED with packageName = "com.android.chrome" because the
-            // system WebView is implemented by Chrome. If Chrome is not actually the
-            // active window, these are false events — discard immediately.
+            // Guard 1: active-window package — AnkiDroid's embedded WebView fires
+            // TYPE_VIEW_CLICKED as "com.android.chrome" even when Anki is foreground.
             val activeRoot = rootInActiveWindow
             if (activeRoot == null || activeRoot.packageName?.toString() != packageName) return
 
-            // Immediate text check: "Preview page" anywhere → block instantly
+            // Guard 2: ground-truth — catches the bottom-of-button edge case where
+            // AnkiDroid's WebView sub-window briefly surfaces as the active window,
+            // making rootInActiveWindow look like Chrome even though Anki is foreground.
+            val groundTruth = devs.org.ultrafocus.utils.DeepWorkSessionManager
+                .groundTruthProvider?.invoke()
+            if (groundTruth != null && groundTruth != packageName) return
+
+            // Guard 3: new-tab action — any "new tab" or "add tab" button must never
+            // trigger preview blocking, even when the previous tab was a blocked site.
+            val clickedId = try { event.source?.viewIdResourceName } catch (_: Exception) { null }
+            if (clickedId != null && (
+                clickedId.contains("new_tab", ignoreCase = true) ||
+                clickedId.contains("add_tab", ignoreCase = true) ||
+                clickedId.contains("open_new_tab", ignoreCase = true))) return
+
+            // Immediate text check
             if (findPreviewTriggerFromNode(activeRoot)) {
                 closePreviewAndExit(packageName)
                 return
             }
 
-            // Delayed scan — only fires if Chrome is still the active window after
-            // the click settles.
+            // Delayed scan — longer delay so new-tab transitions fully settle
             previewClickJob?.cancel()
             previewClickJob = serviceScope.launch {
-                delay(200)
+                delay(400)
                 val delayedRoot = rootInActiveWindow ?: return@launch
                 if (delayedRoot.packageName?.toString() != packageName) return@launch
+
+                // Ground truth at scan time — second chance to catch false events
+                val delayedTruth = devs.org.ultrafocus.utils.DeepWorkSessionManager
+                    .groundTruthProvider?.invoke()
+                if (delayedTruth != null && delayedTruth != packageName) return@launch
+
                 if (!isChromePreview(delayedRoot, packageName)) return@launch
 
-                // Extra guard: if the address bar is empty or shows a Chrome-internal
-                // URL (new tab page, settings, etc.) this is NOT a real site preview —
-                // the new tab page shows "most visited" tiles that can include blocked
-                // sites and would otherwise trigger a false block.
+                // New-tab / internal-page URL guard
                 val url = captureBrowserUrl(delayedRoot, packageName)
                 val isInternalPage = url.isNullOrBlank() ||
                     url.equals("Search or type URL", ignoreCase = true) ||

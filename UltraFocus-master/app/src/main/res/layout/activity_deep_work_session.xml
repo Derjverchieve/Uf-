@@ -534,6 +534,58 @@
                 android:background="?attr/selectableItemBackground"/>
         </LinearLayout>
 
+        <!-- Backup / restore row -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginHorizontal="20dp"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="Backup / Restore"
+                android:textSize="10sp"
+                android:letterSpacing="0.08"
+                android:textStyle="bold"
+                android:textColor="@color/text_hint"/>
+
+            <TextView
+                android:id="@+id/txtImportBackup"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Import"
+                android:textSize="12sp"
+                android:textColor="@color/primary"
+                android:padding="4dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackground"/>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text=" · "
+                android:textSize="12sp"
+                android:textColor="@color/text_hint"/>
+
+            <TextView
+                android:id="@+id/txtExportBackup"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Export backup"
+                android:textSize="12sp"
+                android:textColor="@color/primary"
+                android:padding="4dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackground"/>
+
+        </LinearLayout>
+
         <TextView
             android:id="@+id/txtNoHistory"
             android:layout_width="wrap_content"

@@ -27,6 +27,7 @@ import devs.org.ultrafocus.repository.DeepWorkRepository
 import devs.org.ultrafocus.services.DeepWorkSessionService
 import devs.org.ultrafocus.utils.DeepWorkPrefs
 import devs.org.ultrafocus.utils.DeepWorkExportManager
+import devs.org.ultrafocus.utils.DeepWorkImportManager
 import devs.org.ultrafocus.utils.DeepWorkSessionManager
 import devs.org.ultrafocus.utils.DurationFormatter
 import devs.org.ultrafocus.utils.FocusScoreCalculator
@@ -58,6 +59,33 @@ class DeepWorkSessionActivity : AppCompatActivity() {
                 if (ok) "Exported." else "Export failed.",
                 Toast.LENGTH_SHORT
             ).show()
+        }
+    }
+
+    private val exportBackupLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        uri?.let {
+            val ok = DeepWorkExportManager.exportBackupCsv(this, it)
+            Toast.makeText(this, if (ok) "Backup saved." else "Backup failed.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private val importLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri ?: return@registerForActivityResult
+        lifecycleScope.launch {
+            val result = DeepWorkImportManager.importBackupCsv(this@DeepWorkSessionActivity, uri)
+            val msg = when {
+                result.imported == 0 && result.skipped == 0 -> "Nothing to import."
+                result.invalid > 0 ->
+                    "Imported ${result.imported}, skipped ${result.skipped} duplicates, ${result.invalid} unreadable rows."
+                else ->
+                    "Imported ${result.imported} session${if (result.imported != 1) "s" else ""}" +
+                        if (result.skipped > 0) ", ${result.skipped} already present." else "."
+            }
+            Toast.makeText(this@DeepWorkSessionActivity, msg, Toast.LENGTH_LONG).show()
         }
     }
 
@@ -153,6 +181,14 @@ class DeepWorkSessionActivity : AppCompatActivity() {
 
         binding.txtExportCsv.setOnClickListener {
             exportLauncher.launch("ultrafocus_deep_work_sessions.csv")
+        }
+
+        binding.txtExportBackup.setOnClickListener {
+            exportBackupLauncher.launch("ultrafocus_backup.csv")
+        }
+
+        binding.txtImportBackup.setOnClickListener {
+            importLauncher.launch(arrayOf("text/csv", "text/comma-separated-values", "*/*"))
         }
 
         binding.rowLeaderboard.setOnClickListener {

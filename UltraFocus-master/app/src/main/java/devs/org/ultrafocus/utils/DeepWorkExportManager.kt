@@ -59,7 +59,40 @@ object DeepWorkExportManager {
         }
     }
 
+    /**
+     * Machine-readable backup export — raw millisecond timestamps and all DB fields.
+     * This format is what DeepWorkImportManager reads back. Not for spreadsheets;
+     * use exportSessionsCsv for human-readable analysis.
+     */
     private fun millisToMinutes(ms: Long): Long = TimeUnit.MILLISECONDS.toMinutes(ms)
+
+    fun exportBackupCsv(context: Context, uri: Uri): Boolean {
+        return try {
+            val sessions: List<FocusSession> = runBlocking {
+                AppDatabase.getDatabase(context).focusSessionDao().getAllSessions().first()
+            }
+            val csv = buildString {
+                append("id,primaryAppPackage,primaryAppName,targetDurationMs,startTime,")
+                append("endTime,focusedTimeMs,pauseTimeMs,pauseCount,focusScore,status,updatedAt\n")
+                for (s in sessions.sortedBy { it.startTime }) {
+                    append(s.id).append(',')
+                    append(csvField(s.primaryAppPackage)).append(',')
+                    append(csvField(s.primaryAppName)).append(',')
+                    append(s.targetDurationMs).append(',')
+                    append(s.startTime).append(',')
+                    append(s.endTime ?: "").append(',')
+                    append(s.focusedTimeMs).append(',')
+                    append(s.pauseTimeMs).append(',')
+                    append(s.pauseCount).append(',')
+                    append(s.focusScore ?: "").append(',')
+                    append(s.status.name).append(',')
+                    append(s.updatedAt).append('\n')
+                }
+            }
+            context.contentResolver.openOutputStream(uri)?.use { it.write(csv.toByteArray()) }
+            true
+        } catch (_: Exception) { false }
+    }
 
     // Minimal CSV escaping — wraps in quotes and doubles any internal quotes,
     // only when the field actually needs it (contains a comma, quote, or newline).

@@ -33,6 +33,10 @@ interface FocusSessionDao {
     @Query("SELECT * FROM FocusSession WHERE status = 'COMPLETED' ORDER BY startTime ASC")
     suspend fun getAllCompleted(): List<FocusSession>
 
+    // Used by import to check for duplicate sessions before inserting.
+    @Query("SELECT startTime FROM FocusSession")
+    suspend fun getAllStartTimes(): List<Long>
+
     @Query("DELETE FROM FocusSession WHERE id = :id")
     suspend fun deleteById(id: Long)
 }
