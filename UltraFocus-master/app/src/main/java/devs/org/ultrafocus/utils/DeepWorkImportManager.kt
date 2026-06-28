@@ -37,7 +37,11 @@ object DeepWorkImportManager {
             for (line in lines.drop(1)) {       // drop header
                 if (line.isBlank()) continue
                 try {
-                    val session = parseLine(line) ?: run { invalid++; continue }
+                    val session = parseLine(line)
+                    if (session == null) {
+                        invalid++
+                        continue
+                    }
                     if (session.startTime in existingStartTimes) { skipped++; continue }
                     dao.insert(session)
                     existingStartTimes.add(session.startTime)
