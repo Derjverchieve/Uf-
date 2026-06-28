@@ -20,6 +20,7 @@ import devs.org.ultrafocus.adapters.SessionHistoryAdapter
 import devs.org.ultrafocus.database.AppDatabase
 import devs.org.ultrafocus.databinding.ActivityDeepWorkSessionBinding
 import devs.org.ultrafocus.model.FocusSession
+import devs.org.ultrafocus.model.HistoryItem
 import devs.org.ultrafocus.model.PauseReason
 import devs.org.ultrafocus.model.SessionPhase
 import devs.org.ultrafocus.model.SessionStatus
@@ -197,6 +198,10 @@ class DeepWorkSessionActivity : AppCompatActivity() {
 
         binding.rowKioskSetup.setOnClickListener {
             startActivity(Intent(this, KioskSetupActivity::class.java))
+        }
+
+        binding.rowAnalytics.setOnClickListener {
+            startActivity(Intent(this, AnalyticsActivity::class.java))
         }
 
         binding.btnStartSession.setOnClickListener { startSessionFromInputs() }

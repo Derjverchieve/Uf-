@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:paddingVertical="8dp"
+    android:paddingHorizontal="4dp"
+    android:background="@color/surface_variant">
+
+    <!-- Subtle leading line -->
+    <View
+        android:layout_width="3dp"
+        android:layout_height="20dp"
+        android:layout_marginEnd="10dp"
+        android:background="@color/card_stroke" />
+
+    <TextView
+        android:id="@+id/txtDayLabel"
+        android:layout_width="0dp"
+        android:layout_weight="1"
+        android:layout_height="wrap_content"
+        android:textSize="11sp"
+        android:textStyle="bold"
+        android:letterSpacing="0.06"
+        android:textColor="@color/text_secondary"
+        tools:text="TODAY" />
+
+    <TextView
+        android:id="@+id/txtDayTotal"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textSize="12sp"
+        android:textColor="@color/text_secondary"
+        tools:text="1h 45m · 3 sessions" />
+
+</LinearLayout>

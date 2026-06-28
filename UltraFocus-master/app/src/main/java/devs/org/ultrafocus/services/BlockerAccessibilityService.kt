@@ -70,10 +70,9 @@ class BlockerAccessibilityService : AccessibilityService() {
     // Chrome preview / ephemeral tab IDs
     private val chromePreviewIds = listOf(
         "com.android.chrome:id/ephemeral_tab_view",
-        "com.android.chrome:id/preview_tab_view",
-        "com.android.chrome:id/tab_modal"
-        // open_new_tab_chip intentionally removed: it matches the "new tab" button and
-        // caused the preview blocker to fire every time the user opened a new tab.
+        "com.android.chrome:id/preview_tab_view"
+        // tab_modal removed: it is a general dialog type (e.g. "Leave page?"),
+        // not specific to preview tabs, and fires during new-tab-in-group creation.
     )
 
     private val chromeTabSwitcherIds = listOf(
@@ -273,8 +272,18 @@ class BlockerAccessibilityService : AccessibilityService() {
                 val sessionPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager
                     .state.value.primaryAppPackage
                 val allowed = KioskPrefs.getAllowedPackages(this) + setOfNotNull(sessionPkg)
-                if (packageName !in allowed) {
-                    performBlock(packageName)
+
+                // Use ground truth to get the REAL foreground app.
+                // AnkiDroid's WebView fires TYPE_WINDOW_STATE_CHANGED with
+                // packageName = "com.android.chrome", but the actual foreground
+                // app is still AnkiDroid (which IS in the allowed list). Without
+                // this, every "Show Answer" tap in kiosk mode triggers a block.
+                val groundTruth = devs.org.ultrafocus.utils.DeepWorkSessionManager
+                    .groundTruthProvider?.invoke()
+                val checkPkg = groundTruth ?: packageName
+
+                if (checkPkg !in allowed) {
+                    performBlock(checkPkg)
                     return
                 }
             }
@@ -309,10 +318,12 @@ class BlockerAccessibilityService : AccessibilityService() {
                 return
             }
 
-            // Delayed scan — longer delay so new-tab transitions fully settle
+            // Delayed scan — 800ms so Chrome fully settles after tab creation.
+            // 400ms was not long enough: when opening a new tab from a blocked
+            // site's tab, Chrome's DOM still reported blocked URLs mid-transition.
             previewClickJob?.cancel()
             previewClickJob = serviceScope.launch {
-                delay(400)
+                delay(800)
                 val delayedRoot = rootInActiveWindow ?: return@launch
                 if (delayedRoot.packageName?.toString() != packageName) return@launch
 
