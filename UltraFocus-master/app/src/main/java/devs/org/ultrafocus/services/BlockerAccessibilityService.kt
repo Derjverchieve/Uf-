@@ -403,19 +403,27 @@ class BlockerAccessibilityService : AccessibilityService() {
                     .groundTruthProvider?.invoke()
                 if (delayedTruth != null && delayedTruth != packageName) return@launch
 
-                if (!isChromePreview(delayedRoot, packageName)) return@launch
-
                 // New-tab / internal-page URL guard
                 val url = captureBrowserUrl(delayedRoot, packageName)
                 val isInternalPage = url.isNullOrBlank() ||
                     url.equals("Search or type URL", ignoreCase = true) ||
                     url.startsWith("chrome://", ignoreCase = true) ||
                     url.startsWith("about:", ignoreCase = true)
-                if (isInternalPage) return@launch
 
-                if (scanForBlockedUrls(delayedRoot, packageName) ||
-                    isAnyBlockedHostCurrentlyBlockable(delayedRoot)) {
-                    closePreviewAndExit(packageName)
+                if (!isInternalPage) {
+                    val previewNode = findChromePreviewNode(delayedRoot, packageName)
+                    if (previewNode != null) {
+                        try {
+                            if (scanForBlockedUrls(delayedRoot, packageName) ||
+                                isAnyBlockedHostCurrentlyBlockable(previewNode)) {
+                                closePreviewAndExit(packageName)
+                            }
+                        } finally {
+                            runCatching { previewNode.recycle() }
+                        }
+                    } else if (scanForBlockedUrls(delayedRoot, packageName)) {
+                        closePreviewAndExit(packageName)
+                    }
                 }
             }
             return
@@ -463,12 +471,29 @@ class BlockerAccessibilityService : AccessibilityService() {
                     // URL check (normal pages)
                     if (scanForBlockedUrls(rootNode, packageName)) return
 
-                    val inPreview = isChromePreview(rootNode, packageName)
+                    // This is the path that actually explains "new tab" false
+                    // blocks surviving the click-handler fixes above: it runs
+                    // on every content change, not just clicks, and previously
+                    // had no new-tab/internal-page guard and scanned the WHOLE
+                    // tree for blocked hostnames instead of just the preview.
+                    val url = captureBrowserUrl(rootNode, packageName)
+                    val isInternalPage = url.isNullOrBlank() ||
+                        url.equals("Search or type URL", ignoreCase = true) ||
+                        url.startsWith("chrome://", ignoreCase = true) ||
+                        url.startsWith("about:", ignoreCase = true)
 
-                    // For previews: schedule‑aware hostname check
-                    if (inPreview && isAnyBlockedHostCurrentlyBlockable(rootNode)) {
-                        closePreviewAndExit(packageName)
-                        return
+                    if (!isInternalPage) {
+                        val previewNode = findChromePreviewNode(rootNode, packageName)
+                        if (previewNode != null) {
+                            try {
+                                if (isAnyBlockedHostCurrentlyBlockable(previewNode)) {
+                                    closePreviewAndExit(packageName)
+                                    return
+                                }
+                            } finally {
+                                runCatching { previewNode.recycle() }
+                            }
+                        }
                     }
                 } else {
                     if (!contentScanExemptPackages.contains(packageName) &&
@@ -626,23 +651,40 @@ class BlockerAccessibilityService : AccessibilityService() {
         return false
     }
 
-    private fun isChromePreview(rootNode: AccessibilityNodeInfo, packageName: String): Boolean {
-        if (packageName != "com.android.chrome") return false
+    /**
+     * If Chrome is currently showing a link/tab preview (an "ephemeral tab"),
+     * returns the specific preview container node — caller must recycle it.
+     * Returns null if not in a preview, or if the tab switcher is showing
+     * (never a preview).
+     *
+     * Callers must scan for blocked hostnames WITHIN this node only, never
+     * the whole screen. The old whole-tree scan could pick up unrelated
+     * text — other tabs' titles in a tab-group strip, "Recently closed"
+     * suggestions on the new-tab page — and false-block on content that
+     * was never actually showing in the preview itself. This is the real
+     * cause behind "new tab" false blocks surviving three rounds of
+     * click-handler-only fixes: this function is also called from the
+     * periodic main-scanning-loop below, which runs on every content
+     * change independent of any click and had none of those guards.
+     */
+    private fun findChromePreviewNode(rootNode: AccessibilityNodeInfo, packageName: String): AccessibilityNodeInfo? {
+        if (packageName != "com.android.chrome") return null
         for (id in chromeTabSwitcherIds) {
             val nodes = try { rootNode.findAccessibilityNodeInfosByViewId(id) } catch (_: Exception) { null }
             if (!nodes.isNullOrEmpty()) {
                 nodes.forEach { runCatching { it.recycle() } }
-                return false
+                return null
             }
         }
         for (id in chromePreviewIds) {
             val nodes = try { rootNode.findAccessibilityNodeInfosByViewId(id) } catch (_: Exception) { null }
             if (!nodes.isNullOrEmpty()) {
-                nodes.forEach { runCatching { it.recycle() } }
-                return true
+                val match = nodes.first()
+                nodes.drop(1).forEach { runCatching { it.recycle() } }
+                return match
             }
         }
-        return false
+        return null
     }
 
     private fun captureBrowserUrl(rootNode: AccessibilityNodeInfo, packageName: String): String? {
