@@ -116,6 +116,14 @@
                     android:paddingHorizontal="12dp"
                     android:text="45"/>
 
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Max 60 minutes. Once started, the session locks until it ends — no early exit."
+                    android:textSize="11sp"
+                    android:textColor="@color/text_hint" />
+
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -124,12 +132,22 @@
                     android:weightSum="4">
 
                     <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnPreset25"
+                        android:id="@+id/btnPreset15"
                         style="@style/Widget.Material3.Button.OutlinedButton"
                         android:layout_width="0dp"
                         android:layout_weight="1"
                         android:layout_height="40dp"
                         android:layout_marginEnd="4dp"
+                        android:text="15m"
+                        android:textSize="12sp"/>
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnPreset25"
+                        style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:layout_width="0dp"
+                        android:layout_weight="1"
+                        android:layout_height="40dp"
+                        android:layout_marginHorizontal="4dp"
                         android:text="25m"
                         android:textSize="12sp"/>
 
@@ -149,18 +167,8 @@
                         android:layout_width="0dp"
                         android:layout_weight="1"
                         android:layout_height="40dp"
-                        android:layout_marginHorizontal="4dp"
-                        android:text="60m"
-                        android:textSize="12sp"/>
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btnPreset90"
-                        style="@style/Widget.Material3.Button.OutlinedButton"
-                        android:layout_width="0dp"
-                        android:layout_weight="1"
-                        android:layout_height="40dp"
                         android:layout_marginStart="4dp"
-                        android:text="90m"
+                        android:text="60m"
                         android:textSize="12sp"/>
                 </LinearLayout>
 
@@ -294,6 +302,16 @@
                         android:backgroundTint="@color/locked_red"
                         android:text="End Session"/>
                 </LinearLayout>
+
+                <TextView
+                    android:id="@+id/txtLockedCaption"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="🔒 Locked until 0:00 — ends automatically, no early exit"
+                    android:textSize="11sp"
+                    android:textColor="@color/text_hint"
+                    android:gravity="center"/>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

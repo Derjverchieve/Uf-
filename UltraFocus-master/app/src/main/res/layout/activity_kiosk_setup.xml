@@ -25,7 +25,7 @@
             app:titleTextColor="@color/text_primary"
             app:navigationIcon="@drawable/ic_arrow_back" />
 
-        <!-- Toggle card -->
+        <!-- Info card — kiosk is now automatic, no toggle -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -44,47 +44,41 @@
                 android:orientation="vertical"
                 android:padding="18dp">
 
-                <LinearLayout
-                    android:layout_width="match_parent"
+                <TextView
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical">
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_weight="1"
-                        android:layout_height="wrap_content"
-                        android:orientation="vertical">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="Kiosk mode"
-                            android:textSize="16sp"
-                            android:textStyle="bold"
-                            android:textColor="@color/text_primary" />
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="2dp"
-                            android:text="Block all apps except your allowed list"
-                            android:textSize="13sp"
-                            android:textColor="@color/text_secondary" />
-
-                    </LinearLayout>
-
-                    <com.google.android.material.materialswitch.MaterialSwitch
-                        android:id="@+id/switchKiosk"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content" />
-
-                </LinearLayout>
+                    android:text="Kiosk is automatic"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/text_primary" />
 
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="14dp"
+                    android:layout_marginTop="6dp"
+                    android:text="Starting a session locks the phone to your focus app plus whatever you allow below. It releases the instant the session ends — automatically at 0:00, no early exit."
+                    android:textSize="13sp"
+                    android:lineSpacingExtra="2dp"
+                    android:textColor="@color/text_secondary" />
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginVertical="14dp"
+                    android:background="@color/card_stroke" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="• Sessions max out at 60 minutes\n• The phone dialer always works\n• System UI / launcher get a 10s grace, then block\n• If something goes wrong, a reboot ends the lock"
+                    android:textSize="12sp"
+                    android:lineSpacingExtra="3dp"
+                    android:textColor="@color/text_hint" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
                     android:text="Press a volume button at any time during a session to reveal the quick-switch tile. The tile auto-hides after 5 seconds."
                     android:textSize="12sp"
                     android:textColor="@color/text_hint" />
@@ -92,14 +86,13 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Allowed apps card — only visible when kiosk is on -->
+        <!-- Allowed apps card — always available; applies whenever a session locks -->
         <com.google.android.material.card.MaterialCardView
             android:id="@+id/groupAllowedApps"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginHorizontal="16dp"
             android:layout_marginBottom="16dp"
-            android:visibility="gone"
             app:cardBackgroundColor="@color/surface"
             app:cardCornerRadius="16dp"
             app:cardElevation="0dp"

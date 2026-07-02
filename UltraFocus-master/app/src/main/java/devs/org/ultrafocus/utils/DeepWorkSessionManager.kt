@@ -668,17 +668,24 @@ object DeepWorkSessionManager {
             session.focusedTimeMs + (now - lastFocusStartTimestamp).coerceAtLeast(0)
         else session.focusedTimeMs
 
+        // Hard-lock sessions release the instant the target is reached — no
+        // overtime. Fire the completion alert first (service still shows its
+        // notification/vibration), then finalize immediately. This is also
+        // what fully releases kiosk mode, since kiosk is now tied directly to
+        // session phase (see BlockerAccessibilityService's phase-observer).
+        if (!targetReachedFired && session.targetDurationMs > 0 && liveFocused >= session.targetDurationMs) {
+            targetReachedFired = true
+            onTargetReached?.invoke()
+            completeSession()
+            return
+        }
+
         val open = openPauseEvent
         val livePause = if (phase == SessionPhase.PAUSED && open != null)
             session.pauseTimeMs + (now - open.startTime).coerceAtLeast(0)
         else session.pauseTimeMs
 
         _state.value = _state.value.copy(focusedTimeMs = liveFocused, pauseTimeMs = livePause)
-
-        if (!targetReachedFired && session.targetDurationMs > 0 && liveFocused >= session.targetDurationMs) {
-            targetReachedFired = true
-            onTargetReached?.invoke()
-        }
 
         tickCount++
         if (phase == SessionPhase.RUNNING && tickCount % CHECKPOINT_INTERVAL_TICKS == 0) {

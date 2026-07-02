@@ -34,22 +34,9 @@ class KioskSetupActivity : AppCompatActivity() {
 
         binding.toolbar.setNavigationOnClickListener { finish() }
 
-        // Kiosk toggle
-        binding.switchKiosk.isChecked = KioskPrefs.isKioskEnabled(this)
-        updateAllowedCard(KioskPrefs.isKioskEnabled(this))
-
-        binding.switchKiosk.setOnCheckedChangeListener { _, checked ->
-            KioskPrefs.setKioskEnabled(this, checked)
-            updateAllowedCard(checked)
-        }
-
         binding.btnAddAllowedApp.setOnClickListener { showAppPicker() }
 
         refreshList()
-    }
-
-    private fun updateAllowedCard(enabled: Boolean) {
-        binding.groupAllowedApps.visibility = if (enabled) View.VISIBLE else View.GONE
     }
 
     private fun showAppPicker() {

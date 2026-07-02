@@ -105,6 +105,41 @@ class BlockerAccessibilityService : AccessibilityService() {
     private var isServiceReady = false
     private lateinit var kioskOverlayManager: KioskOverlayManager
 
+    // ── Kiosk lock exemptions ────────────────────────────────────────────────
+
+    // Always reachable, lock or no lock — resolved via the standard "who
+    // handles ACTION_DIAL" query (no extra permission needed), plus a static
+    // fallback list for common phone/InCallUI packages in case resolution
+    // fails on a given OEM skin. Known limitation: this doesn't enumerate
+    // every OEM's exact incoming-call UI package, just the common ones.
+    private val dialerPackages: Set<String> by lazy {
+        val resolved = try {
+            packageManager.resolveActivity(
+                Intent(Intent.ACTION_DIAL), android.content.pm.PackageManager.MATCH_DEFAULT_ONLY
+            )?.activityInfo?.packageName
+        } catch (_: Exception) { null }
+        setOfNotNull(resolved) + setOf(
+            "com.google.android.dialer", "com.android.dialer", "com.android.server.telecom",
+            "com.android.incallui", "com.samsung.android.dialer", "com.samsung.android.incallui",
+            "com.transsion.phonebook"
+        )
+    }
+
+    // System UI (quick settings, volume panel, notification shade) and the
+    // HiOS launcher get a 10s grace instead of an instant block — see the
+    // kioskGraceStartMs field doc below for how the grace itself works.
+    private val kioskGracePackages = setOf(
+        "com.android.systemui", "com.transsion.hilauncher", "com.transsion.xlauncher"
+    )
+    private val KIOSK_GRACE_MS = 10_000L
+
+    // Cumulative — NOT reset each time you re-enter systemui/the launcher.
+    // Only resets when ground truth resolves to an allowed app or the dialer.
+    // Without this, tapping home for <10s at a time, repeatedly, would dodge
+    // the block indefinitely; with it, lingering across any number of bounces
+    // still adds up and blocks once the 10s total is spent.
+    private var kioskGraceStartMs: Long? = null
+
     /**
      * Detects volume changes made via the quick-settings slider (or any other method
      * that changes the actual stream volume — physical buttons, assistant, etc.).
@@ -117,7 +152,8 @@ class BlockerAccessibilityService : AccessibilityService() {
         object : ContentObserver(Handler(Looper.getMainLooper())) {
             override fun onChange(selfChange: Boolean) {
                 val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                if (current != lastVolume && KioskPrefs.isKioskEnabled(this@BlockerAccessibilityService)) {
+                if (current != lastVolume &&
+                    devs.org.ultrafocus.utils.DeepWorkSessionManager.state.value.phase != SessionPhase.IDLE) {
                     lastVolume = current
                     val sessionPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager
                         .state.value.primaryAppPackage
@@ -177,15 +213,16 @@ class BlockerAccessibilityService : AccessibilityService() {
             volumeObserver
         )
 
-        // Persistent corner timer: shows lock icon + countdown whenever kiosk
-        // and an active session are both running at the same time.
+        // Persistent corner timer: shows lock icon + countdown whenever a
+        // session is active — kiosk is now tied directly to session phase,
+        // not a separate toggle (see class doc on kioskGraceStartMs above).
         serviceScope.launch {
             devs.org.ultrafocus.utils.DeepWorkSessionManager.state.collectLatest { state ->
-                if (KioskPrefs.isKioskEnabled(this@BlockerAccessibilityService) &&
-                    state.phase != SessionPhase.IDLE) {
+                if (state.phase != SessionPhase.IDLE) {
                     kioskOverlayManager.showPersistentTimer()
                 } else {
                     kioskOverlayManager.hidePersistentTimer()
+                    kioskGraceStartMs = null // fresh accumulator for the next session
                 }
             }
         }
@@ -254,40 +291,60 @@ class BlockerAccessibilityService : AccessibilityService() {
 
         if (packageName == this.packageName) return
 
-        // ── Kiosk mode: block any app not on the allowed list immediately ─────
+        // ── Kiosk lock: active whenever a session is running or paused ────────
+        // No longer a separate on/off toggle — starting a session activates
+        // it, and it releases the instant the session ends. That happens
+        // either automatically (target reached, no overtime — see
+        // DeepWorkSessionManager.tick) or via crash-recovery on next launch
+        // if the process dies. There is deliberately no in-app override.
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            KioskPrefs.isKioskEnabled(this)) {
-            // Exempt system-level packages. Without this, the volume panel, IME,
-            // permission dialogs, clipboard toasts, and any other system overlay all
-            // fire TYPE_WINDOW_STATE_CHANGED with a package not in the allowed list
-            // and get blocked immediately — making kiosk completely unusable.
+            devs.org.ultrafocus.utils.DeepWorkSessionManager.state.value.phase != SessionPhase.IDLE) {
+
             val windowType = try {
                 windows.firstOrNull { it.id == event.windowId }?.type
             } catch (_: Exception) { null }
-            val isSystemOverlay = packageName == "android" ||
-                packageName in contentScanExemptPackages ||
+            val isNonAppWindow = packageName == "android" ||
                 (windowType != null && windowType in DEEP_WORK_EXEMPT_WINDOW_TYPES)
 
-            if (!isSystemOverlay) {
+            if (!isNonAppWindow) {
                 val sessionPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager
                     .state.value.primaryAppPackage
                 val allowed = KioskPrefs.getAllowedPackages(this) + setOfNotNull(sessionPkg)
 
-                // Use ground truth to get the REAL foreground app.
-                // AnkiDroid's WebView fires TYPE_WINDOW_STATE_CHANGED with
-                // packageName = "com.android.chrome", but the actual foreground
-                // app is still AnkiDroid (which IS in the allowed list). Without
-                // this, every "Show Answer" tap in kiosk mode triggers a block.
+                // Ground truth, not the raw event package — same reasoning as
+                // the preview blocker below: AnkiDroid's WebView reports as
+                // com.android.chrome, so without this every Show Answer tap
+                // in a locked session would read "Chrome" (not allowed)
+                // instead of "AnkiDroid" (allowed).
                 val groundTruth = devs.org.ultrafocus.utils.DeepWorkSessionManager
                     .groundTruthProvider?.invoke()
                 val checkPkg = groundTruth ?: packageName
 
-                if (checkPkg !in allowed) {
-                    performBlock(checkPkg)
-                    return
+                when {
+                    checkPkg in dialerPackages -> {
+                        kioskGraceStartMs = null
+                    }
+                    checkPkg in allowed -> {
+                        kioskGraceStartMs = null
+                    }
+                    checkPkg in kioskGracePackages -> {
+                        val start = kioskGraceStartMs
+                            ?: System.currentTimeMillis().also { kioskGraceStartMs = it }
+                        if (System.currentTimeMillis() - start >= KIOSK_GRACE_MS) {
+                            performBlock(checkPkg)
+                            return
+                        }
+                        // else: still within the cumulative grace window — allow silently
+                    }
+                    else -> {
+                        kioskGraceStartMs = null
+                        performBlock(checkPkg)
+                        return
+                    }
                 }
             }
-            // System overlay or allowed app — falls through to normal content blocking
+            // Non-app window, allowed app, or dialer — falls through to normal
+            // content blocking below.
         }
         if (browserPackages.contains(packageName) &&
             event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
@@ -785,7 +842,7 @@ class BlockerAccessibilityService : AccessibilityService() {
     override fun onKeyEvent(event: KeyEvent?): Boolean {
         if (event != null &&
             event.action == KeyEvent.ACTION_DOWN &&
-            KioskPrefs.isKioskEnabled(this) &&
+            devs.org.ultrafocus.utils.DeepWorkSessionManager.state.value.phase != SessionPhase.IDLE &&
             (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
              event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
             val sessionPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager

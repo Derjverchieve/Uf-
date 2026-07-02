@@ -5,24 +5,21 @@ import android.content.Context
 /**
  * Persistent storage for kiosk mode configuration.
  *
+ * Kiosk itself has no on/off flag anymore — it's driven directly by whether
+ * a session is active (see BlockerAccessibilityService, which checks
+ * DeepWorkSessionManager.state.value.phase). This object only stores WHICH
+ * apps are allowed while a session is locked.
+ *
  * Allowed apps are stored as a flat string "pkg|label,pkg|label,..." so that
  * both the package set AND the display labels survive across restarts without
  * needing a separate DB table.
  */
 object KioskPrefs {
     private const val PREFS_NAME = "ultrafocus_kiosk"
-    private const val KEY_ENABLED = "kiosk_enabled"
     private const val KEY_ALLOWED_LABELS = "allowed_labels"
 
     private fun prefs(ctx: Context) =
         ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
-    fun isKioskEnabled(ctx: Context): Boolean =
-        prefs(ctx).getBoolean(KEY_ENABLED, false)
-
-    fun setKioskEnabled(ctx: Context, enabled: Boolean) {
-        prefs(ctx).edit().putBoolean(KEY_ENABLED, enabled).apply()
-    }
 
     /** Returns a set of just the package names — fast for the blocker's membership check. */
     fun getAllowedPackages(ctx: Context): Set<String> =

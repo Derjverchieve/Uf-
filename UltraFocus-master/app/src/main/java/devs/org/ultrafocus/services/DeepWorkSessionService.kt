@@ -200,7 +200,9 @@ class DeepWorkSessionService : Service() {
             state.phase == SessionPhase.PAUSED && state.currentPauseReason == PauseReason.MANUAL ->
                 builder.addAction(0, "Resume", actionPendingIntent(ACTION_RESUME))
         }
-        builder.addAction(0, "End Session", actionPendingIntent(ACTION_END))
+        // No "End Session" action: hard-lock sessions auto-complete the
+        // instant they hit target (no overtime), so there's never a valid
+        // moment for a manual end from the notification shade either.
 
         return builder.build()
     }
@@ -216,8 +218,8 @@ class DeepWorkSessionService : Service() {
         )
         val notification = NotificationCompat.Builder(this, TARGET_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("Target reached — $targetStr")
-            .setContentText("${state.primaryAppName ?: "Session"} · keep going or wrap up from here.")
+            .setContentTitle("Session complete — $targetStr")
+            .setContentText("${state.primaryAppName ?: "Session"} · target reached, session ended.")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setAutoCancel(true)

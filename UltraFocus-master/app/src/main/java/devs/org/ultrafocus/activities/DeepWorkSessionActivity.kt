@@ -32,7 +32,6 @@ import devs.org.ultrafocus.utils.DeepWorkImportManager
 import devs.org.ultrafocus.utils.DeepWorkSessionManager
 import devs.org.ultrafocus.utils.DurationFormatter
 import devs.org.ultrafocus.utils.FocusScoreCalculator
-import devs.org.ultrafocus.utils.KioskPrefs
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
@@ -175,10 +174,10 @@ class DeepWorkSessionActivity : AppCompatActivity() {
 
         binding.rowPrimaryApp.setOnClickListener { showAppPicker() }
 
+        binding.btnPreset15.setOnClickListener { binding.inputTargetMinutes.setText("15") }
         binding.btnPreset25.setOnClickListener { binding.inputTargetMinutes.setText("25") }
         binding.btnPreset45.setOnClickListener { binding.inputTargetMinutes.setText("45") }
         binding.btnPreset60.setOnClickListener { binding.inputTargetMinutes.setText("60") }
-        binding.btnPreset90.setOnClickListener { binding.inputTargetMinutes.setText("90") }
 
         binding.txtExportCsv.setOnClickListener {
             exportLauncher.launch("ultrafocus_deep_work_sessions.csv")
@@ -215,14 +214,10 @@ class DeepWorkSessionActivity : AppCompatActivity() {
             }
         }
 
-        binding.btnEndSession.setOnClickListener {
-            MaterialAlertDialogBuilder(this)
-                .setTitle("End session?")
-                .setMessage("This locks in your focus score for this session.")
-                .setPositiveButton("End") { _, _ -> DeepWorkSessionManager.completeSession() }
-                .setNegativeButton("Keep going", null)
-                .show()
-        }
+        // No click listener on btnEndSession: it stays disabled for the
+        // entire duration of an active session (see render()) — sessions
+        // now auto-complete the instant they hit target, so there's never a
+        // moment where a manual End would be both allowed and meaningful.
     }
 
     private fun startSessionFromInputs() {
@@ -237,6 +232,14 @@ class DeepWorkSessionActivity : AppCompatActivity() {
             Toast.makeText(this, "Enter a target duration in minutes.", Toast.LENGTH_SHORT).show()
             return
         }
+        if (minutes > DeepWorkPrefs.MAX_TARGET_MINUTES) {
+            Toast.makeText(
+                this,
+                "Max session length is ${DeepWorkPrefs.MAX_TARGET_MINUTES} minutes — sessions lock until they end.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
         DeepWorkPrefs.saveLastTargetMinutes(this, minutes)
 
         DeepWorkSessionManager.startSession(pkg, name, TimeUnit.MINUTES.toMillis(minutes.toLong()))
@@ -244,7 +247,7 @@ class DeepWorkSessionActivity : AppCompatActivity() {
         val intent = Intent(this, DeepWorkSessionService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
 
-        Toast.makeText(this, "Session started — switch to $name now.", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, "Session locked — switch to $name now. Ends automatically at 0:00.", Toast.LENGTH_LONG).show()
     }
 
     // ── App picker ───────────────────────────────────────────────────────
@@ -295,6 +298,9 @@ class DeepWorkSessionActivity : AppCompatActivity() {
     }
 
     private fun render(state: devs.org.ultrafocus.model.DeepWorkUiState) {
+        // Kiosk is tied directly to session phase now — no separate toggle.
+        binding.txtKioskStatus.text = if (state.phase != SessionPhase.IDLE) "Active" else "Ready"
+
         when (state.phase) {
             SessionPhase.IDLE -> {
                 binding.cardLive.visibility = android.view.View.GONE
@@ -307,6 +313,13 @@ class DeepWorkSessionActivity : AppCompatActivity() {
                 binding.cardLive.visibility = android.view.View.VISIBLE
                 binding.groupSummary.visibility = android.view.View.GONE
                 binding.groupPauseLog.visibility = android.view.View.VISIBLE
+
+                // Hard-locked for the entire life of the session: it auto-
+                // completes the instant focused time hits target (no
+                // overtime), so there's never a moment where a manual End
+                // would be both allowed and meaningful. See DeepWorkSessionManager.tick.
+                binding.btnEndSession.isEnabled = false
+                binding.btnEndSession.alpha = 0.5f
 
                 if (state.phase == SessionPhase.RUNNING) {
                     binding.txtLiveState.text = "Focused — ${state.primaryAppName}"
@@ -448,8 +461,6 @@ class DeepWorkSessionActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Keep kiosk status label in sync when returning from KioskSetupActivity
-        binding.txtKioskStatus.text = if (KioskPrefs.isKioskEnabled(this)) "On" else "Off"
         // Camera permission — needed for face-presence auto-pause.
         // Request once silently; user can re-prompt from system settings if denied.
         if (android.content.pm.PackageManager.PERMISSION_GRANTED !=
