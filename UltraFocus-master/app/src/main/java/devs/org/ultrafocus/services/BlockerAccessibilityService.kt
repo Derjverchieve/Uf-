@@ -128,10 +128,15 @@ class BlockerAccessibilityService : AccessibilityService() {
     // System UI (quick settings, volume panel, notification shade) and the
     // HiOS launcher get a 10s grace instead of an instant block — see the
     // kioskGraceStartMs field doc below for how the grace itself works.
-    private val kioskGracePackages = setOf(
-        "com.android.systemui", "com.transsion.hilauncher", "com.transsion.xlauncher"
+    // Also doubles as the single source of truth for the friendly labels
+    // used when the session timer pauses immediately on entry (see the
+    // Deep Work tracking call above) — one list, not two.
+    private val kioskGracePackages = mapOf(
+        "com.android.systemui" to "System UI",
+        "com.transsion.hilauncher" to "Home screen",
+        "com.transsion.xlauncher" to "Home screen"
     )
-    private val KIOSK_GRACE_MS = 10_000L
+    private val KIOSK_GRACE_MS = 4_000L
 
     // Cumulative — NOT reset each time you re-enter systemui/the launcher.
     // Only resets when ground truth resolves to an allowed app or the dialer.
@@ -200,6 +205,9 @@ class BlockerAccessibilityService : AccessibilityService() {
             } catch (_: Exception) {
                 null
             }
+        }
+        devs.org.ultrafocus.utils.DeepWorkSessionManager.kioskGraceLabelProvider = { pkg ->
+            kioskGracePackages[pkg]
         }
 
         kioskOverlayManager = KioskOverlayManager(this)
@@ -283,8 +291,14 @@ class BlockerAccessibilityService : AccessibilityService() {
                     null
                 }
                 val isExemptWindowType = windowType != null && windowType in DEEP_WORK_EXEMPT_WINDOW_TYPES
+                // System UI / HiOS launcher: the session should stop crediting
+                // focus time the MOMENT you land here, even though the kiosk
+                // block itself waits KIOSK_GRACE_MS before actually bouncing
+                // you back — the timer and the block are deliberately on two
+                // different clocks now. See onForegroundAppChanged's doc.
+                val immediatePauseLabel = kioskGracePackages[packageName]
                 devs.org.ultrafocus.utils.DeepWorkSessionManager.onForegroundAppChanged(
-                    packageName, className, isExemptWindowType
+                    packageName, className, isExemptWindowType, immediatePauseLabel
                 )
             } catch (_: Exception) {}
         }
@@ -864,5 +878,6 @@ class BlockerAccessibilityService : AccessibilityService() {
             kioskOverlayManager.destroy()
         }
         devs.org.ultrafocus.utils.DeepWorkSessionManager.groundTruthProvider = null
+        devs.org.ultrafocus.utils.DeepWorkSessionManager.kioskGraceLabelProvider = null
     }
 }

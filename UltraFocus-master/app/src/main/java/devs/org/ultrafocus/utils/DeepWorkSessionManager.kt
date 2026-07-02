@@ -46,6 +46,13 @@ import kotlinx.coroutines.launch
  *  expires (not from when they first left) — the grace window counts as
  *  continued focus, not as part of the pause.
  *
+ *  Exception: system UI and the HiOS launcher (identified by
+ *  BlockerAccessibilityService, passed in as immediatePauseLabel) skip this
+ *  grace entirely and pause the instant you land there. This is a separate
+ *  clock from the kiosk block itself, which still waits a few seconds before
+ *  bouncing you back — a quick glance is forgiven from being BLOCKED, it
+ *  just isn't counted as focus while it lasts.
+ *
  *  Returning to the primary app always resumes immediately — no grace
  *  delay on the way back in.
  *
@@ -145,6 +152,16 @@ object DeepWorkSessionManager {
     // whatever's actually active gets confirmed (or corrected to) within
     // about a second, no matter how long the bad signal has been going.
     var groundTruthProvider: (() -> String?)? = null
+
+    // Set by BlockerAccessibilityService. Given a package name, returns the
+    // friendly immediate-pause label if it's system UI or the HiOS launcher,
+    // null otherwise — lets tick()'s ground-truth correction path apply the
+    // exact same immediate-pause treatment as the primary accessibility-event
+    // path (see onForegroundAppChanged), even on the rare occasion ground
+    // truth is what first catches a systemui/launcher transition. Keeps this
+    // file free of hardcoded OEM package names — that list lives in
+    // BlockerAccessibilityService's kioskGracePackages, the single source of truth.
+    var kioskGraceLabelProvider: ((String) -> String?)? = null
 
     @Synchronized
     fun init(context: Context) {
@@ -312,7 +329,12 @@ object DeepWorkSessionManager {
 
     // ── Called from BlockerAccessibilityService on every foreground-app change ──
 
-    fun onForegroundAppChanged(packageName: String, className: String? = null, isExemptWindowType: Boolean = false) {
+    fun onForegroundAppChanged(
+        packageName: String,
+        className: String? = null,
+        isExemptWindowType: Boolean = false,
+        immediatePauseLabel: String? = null
+    ) {
         if (!initialized) return
         // Any part of OUR OWN app — not just the session screen — is exempt.
         // This used to be scoped to just the session screen's exact class
@@ -332,7 +354,7 @@ object DeepWorkSessionManager {
         if (_state.value.phase == SessionPhase.IDLE) return
         if (packageName == lastSeenForegroundPackage) return
         lastSeenForegroundPackage = packageName
-        evaluateForeground(packageName)
+        evaluateForeground(packageName, immediatePauseLabel)
     }
 
     // Soft keyboards (Gboard, Samsung Keyboard, SwiftKey, etc.) can register
@@ -350,7 +372,7 @@ object DeepWorkSessionManager {
         }
     }
 
-    private fun evaluateForeground(packageName: String) {
+    private fun evaluateForeground(packageName: String, immediatePauseLabel: String? = null) {
         val session = currentSession ?: return
         val now = System.currentTimeMillis()
         val phase = _state.value.phase
@@ -366,6 +388,19 @@ object DeepWorkSessionManager {
 
         when (phase) {
             SessionPhase.RUNNING -> {
+                if (immediatePauseLabel != null) {
+                    // System UI / HiOS launcher while locked: stop crediting
+                    // focus time the moment you land here — skip the normal
+                    // GRACE_PERIOD_MS entirely. This is deliberately a
+                    // different clock than the kiosk block itself (see
+                    // BlockerAccessibilityService.KIOSK_GRACE_MS), which still
+                    // waits a few seconds before actually bouncing you back.
+                    // A quick glance still gets forgiven from being BLOCKED;
+                    // it just doesn't get counted as focus while it lasts.
+                    graceJob?.cancel(); graceJob = null
+                    openNewPause(now, PauseReason.APP_SWITCH, packageName, immediatePauseLabel)
+                    return
+                }
                 if (graceJob == null) {
                     graceJob = managerScope.launch {
                         delay(GRACE_PERIOD_MS)
@@ -655,7 +690,7 @@ object DeepWorkSessionManager {
         // field doc on groundTruthProvider for why this needs to run first.
         groundTruthProvider?.invoke()?.let { truth ->
             if (truth != lastSeenForegroundPackage) {
-                onForegroundAppChanged(truth)
+                onForegroundAppChanged(truth, immediatePauseLabel = kioskGraceLabelProvider?.invoke(truth))
             }
         }
 
