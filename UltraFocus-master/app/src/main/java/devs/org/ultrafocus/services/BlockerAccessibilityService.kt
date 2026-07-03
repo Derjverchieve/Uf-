@@ -345,14 +345,14 @@ class BlockerAccessibilityService : AccessibilityService() {
                         val start = kioskGraceStartMs
                             ?: System.currentTimeMillis().also { kioskGraceStartMs = it }
                         if (System.currentTimeMillis() - start >= KIOSK_GRACE_MS) {
-                            performBlock(checkPkg)
+                            performBlock(checkPkg, reason = "kiosk-grace-expired")
                             return
                         }
                         // else: still within the cumulative grace window — allow silently
                     }
                     else -> {
                         kioskGraceStartMs = null
-                        performBlock(checkPkg)
+                        performBlock(checkPkg, reason = "kiosk-not-allowed")
                         return
                     }
                 }
@@ -385,7 +385,7 @@ class BlockerAccessibilityService : AccessibilityService() {
 
             // Immediate text check
             if (findPreviewTriggerFromNode(activeRoot)) {
-                closePreviewAndExit(packageName)
+                closePreviewAndExit(packageName, reason = "click-immediate-text")
                 return
             }
 
@@ -416,14 +416,20 @@ class BlockerAccessibilityService : AccessibilityService() {
                         try {
                             if (scanForBlockedUrls(delayedRoot, packageName) ||
                                 isAnyBlockedHostCurrentlyBlockable(previewNode)) {
-                                closePreviewAndExit(packageName)
+                                closePreviewAndExit(packageName, reason = "click-delayed-preview-scan")
                             }
                         } finally {
                             runCatching { previewNode.recycle() }
                         }
-                    } else if (scanForBlockedUrls(delayedRoot, packageName)) {
-                        closePreviewAndExit(packageName)
                     }
+                    // Not a preview: nothing else to do here. The main
+                    // scanning loop below already runs scanForBlockedUrls on
+                    // every content change independently, so this branch
+                    // doesn't need its own redundant call — and a prior
+                    // attempt at fixing this bug added exactly that
+                    // redundant call, which is itself a plausible source of
+                    // false positives, since address-bar text can be
+                    // momentarily stale during any tab transition.
                 }
             }
             return
@@ -458,7 +464,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                             val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
                             am.killBackgroundProcesses(blockedPkg)
                         } catch (_: Exception) {}
-                        performBlock(blockedPkg)
+                        performBlock(blockedPkg, reason = "split-screen-guard")
                         return
                     }
                 }
@@ -487,7 +493,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                         if (previewNode != null) {
                             try {
                                 if (isAnyBlockedHostCurrentlyBlockable(previewNode)) {
-                                    closePreviewAndExit(packageName)
+                                    closePreviewAndExit(packageName, reason = "mainloop-preview-scan")
                                     return
                                 }
                             } finally {
@@ -498,7 +504,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                 } else {
                     if (!contentScanExemptPackages.contains(packageName) &&
                         scanForBlockedContent(rootNode, packageName, hostnameCheck = false)) {
-                        performBlock(packageName)
+                        performBlock(packageName, reason = "content-scan")
                         return
                     }
                 }
@@ -511,13 +517,13 @@ class BlockerAccessibilityService : AccessibilityService() {
 
             if (className.isNotEmpty() &&
                 SpecificScreenManager.isScreenBlocked(this, className)) {
-                performBlock(packageName)
+                performBlock(packageName, reason = "specific-screen-blocked")
                 return
             }
 
             val appInfo = blockedAppInfos.find { it.packageName == packageName }
             if (appInfo != null && shouldBlockNow(appInfo)) {
-                performBlock(packageName)
+                performBlock(packageName, reason = "scheduled-app-block")
             }
         }
     }
@@ -565,7 +571,7 @@ class BlockerAccessibilityService : AccessibilityService() {
     }
 
     // ── Preview close logic ───────────────────────────────────────────────
-    private fun closePreviewAndExit(packageName: String) {
+    private fun closePreviewAndExit(packageName: String, reason: String = "unknown") {
         if (TemporaryAccessManager.isAllowed(packageName)) return
 
         val now = System.currentTimeMillis()
@@ -575,6 +581,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
         lastBlockedPackage = packageName
         lastBlockTime = now
+        debugToast("closePreviewAndExit", reason)
 
         val root = rootInActiveWindow
         if (root != null && findAndClickPreviewClose(root)) {
@@ -706,29 +713,66 @@ class BlockerAccessibilityService : AccessibilityService() {
         return null
     }
 
-    private fun scanForBlockedUrls(rootNode: AccessibilityNodeInfo, packageName: String): Boolean {
-        val currentUrl = captureBrowserUrl(rootNode, packageName) ?: return false
+    // Requires the SAME captured url to be seen on a second, later scan
+    // pass — at least URL_CONFIRM_DELAY_MS after the first — before
+    // scanForBlockedUrls acts on it. See the function doc below for why.
+    private var pendingScanUrl: String? = null
+    private var pendingScanUrlSeenAtMs: Long = 0
+    private val URL_CONFIRM_DELAY_MS = 350L
 
-        if (WebAllowlistManager.isBlockedByAllowlist(this, currentUrl)) {
+    /**
+     * Reads the address bar and redirects away if it matches a blocked
+     * rule. Runs unconditionally on every scan pass AND every delayed
+     * click-scan, with no preview check at all — this had NO stability
+     * guard through five rounds of fixing preview-detection logic
+     * elsewhere in this file. A tab transition (new tab, new tab in
+     * group, tab-switch animation) can leave the PREVIOUS tab's committed
+     * URL sitting in the omnibox for a moment before it updates, and a
+     * single instantaneous read can't tell that apart from genuinely
+     * navigating to a blocked site. Requiring the same url to persist
+     * across two reads, a beat apart, can.
+     */
+    private fun scanForBlockedUrls(rootNode: AccessibilityNodeInfo, packageName: String): Boolean {
+        val currentUrl = captureBrowserUrl(rootNode, packageName) ?: run {
+            pendingScanUrl = null
+            return false
+        }
+
+        val matchesAllowlist = WebAllowlistManager.isBlockedByAllowlist(this, currentUrl)
+        val matchesSchedule = !matchesAllowlist && WebsiteBlockManager.shouldBlockUrl(this, currentUrl)
+        if (!matchesAllowlist && !matchesSchedule) {
+            pendingScanUrl = null
+            return false
+        }
+
+        val now = System.currentTimeMillis()
+        if (pendingScanUrl != currentUrl) {
+            pendingScanUrl = currentUrl
+            pendingScanUrlSeenAtMs = now
+            return false // first sighting of this exact url — not confirmed yet
+        }
+        if (now - pendingScanUrlSeenAtMs < URL_CONFIRM_DELAY_MS) {
+            return false // seen twice already, but still too close together
+        }
+        pendingScanUrl = null
+
+        if (matchesAllowlist) {
             val blockKey = WebAllowlistManager::class.java.simpleName
-            val now = System.currentTimeMillis()
             if (blockKey == lastBlockedWebsiteKey && now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
             lastBlockedWebsiteKey = blockKey
             lastWebsiteBlockTime = now
+            debugToast("scanForBlockedUrls", "allowlist: $currentUrl")
             tryRedirectBrowserTab(rootNode, packageName)
             performGlobalAction(GLOBAL_ACTION_HOME)
             performRedirectToGoogle()
             return true
         }
 
-        if (!WebsiteBlockManager.shouldBlockUrl(this, currentUrl)) return false
-
         val blockKey = WebsiteBlockManager.normalizeHost(currentUrl)
-        if (blockKey == lastBlockedWebsiteKey &&
-            System.currentTimeMillis() - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
+        if (blockKey == lastBlockedWebsiteKey && now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
         lastBlockedWebsiteKey = blockKey
-        lastWebsiteBlockTime = System.currentTimeMillis()
-
+        lastWebsiteBlockTime = now
+        debugToast("scanForBlockedUrls", "schedule: $currentUrl")
         tryRedirectBrowserTab(rootNode, packageName)
         performGlobalAction(GLOBAL_ACTION_HOME)
         performRedirectToGoogle()
@@ -843,7 +887,27 @@ class BlockerAccessibilityService : AccessibilityService() {
         } catch (_: Exception) {}
     }
 
-    private fun performBlock(packageName: String) {
+    /**
+     * Temporary, low-noise diagnostic aid: shows exactly which mechanism
+     * fired a block and what triggered it. Only runs on an actual block
+     * action, not on every scan pass, so it shouldn't be spammy. Added
+     * after five rounds of guessing at preview-detection logic to fix
+     * "new tab" false blocks — this replaces guessing with a direct report
+     * of which of the several distinct block mechanisms in this file is
+     * actually responsible, next time it happens.
+     */
+    private fun debugToast(source: String, detail: String) {
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        handler.post {
+            try {
+                android.widget.Toast.makeText(
+                    this, "🔍 $source: $detail", android.widget.Toast.LENGTH_LONG
+                ).show()
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun performBlock(packageName: String, reason: String = "unknown") {
         if (packageName == this.packageName) return
         if (TemporaryAccessManager.isAllowed(packageName)) return
         try {
@@ -855,6 +919,7 @@ class BlockerAccessibilityService : AccessibilityService() {
             currentlyBlockedApps.add(packageName)
             lastBlockedPackage = packageName
             lastBlockTime = currentTime
+            debugToast("performBlock", "$reason -> $packageName")
 
             performGlobalAction(GLOBAL_ACTION_BACK)
             performGlobalAction(GLOBAL_ACTION_HOME)
