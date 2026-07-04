@@ -384,8 +384,10 @@ class BlockerAccessibilityService : AccessibilityService() {
                 clickedId.contains("open_new_tab", ignoreCase = true))) return
 
             // Immediate text check
-            if (findPreviewTriggerFromNode(activeRoot)) {
-                closePreviewAndExit(packageName, reason = "click-immediate-text")
+            val previewTriggerMatch = findPreviewTriggerFromNode(activeRoot)
+            if (previewTriggerMatch != null) {
+                val shown = previewTriggerMatch.take(80)
+                closePreviewAndExit(packageName, reason = "click-immediate-text: \"$shown\"")
                 return
             }
 
@@ -808,26 +810,36 @@ class BlockerAccessibilityService : AccessibilityService() {
         return norm.contains("preview page") || norm.contains("open preview")
     }
 
-    private fun findPreviewTriggerFromNode(node: AccessibilityNodeInfo?): Boolean {
-        if (node == null) return false
+    /**
+     * Returns the exact matched text if some node's text/contentDescription
+     * contains a preview trigger phrase, or null otherwise. Returning the
+     * actual match (not just a boolean) is deliberate: this exact check
+     * fired on a plain "new tab" click with no delay and no navigation
+     * involved at all, which strongly suggests it's matching something in
+     * Chrome's OWN UI unrelated to any real preview — most likely an
+     * accessibility content-description on the tab strip meant for screen
+     * readers. Surfacing the matched string in the block toast (see call
+     * site) tells us exactly what, instead of guessing at Chrome's
+     * internals a further time.
+     */
+    private fun findPreviewTriggerFromNode(node: AccessibilityNodeInfo?): String? {
+        if (node == null) return null
         return findPreviewTriggerFromNodeWithVisited(node, HashSet())
     }
 
-    private fun findPreviewTriggerFromNodeWithVisited(node: AccessibilityNodeInfo?, visited: MutableSet<Int>): Boolean {
-        if (node == null) return false
+    private fun findPreviewTriggerFromNodeWithVisited(node: AccessibilityNodeInfo?, visited: MutableSet<Int>): String? {
+        if (node == null) return null
         val key = System.identityHashCode(node)
-        if (!visited.add(key)) return false
+        if (!visited.add(key)) return null
         val text = listOfNotNull(node.text?.toString(), node.contentDescription?.toString()).joinToString(" ").trim()
-        if (text.isNotBlank() && containsPreviewTrigger(text)) return true
+        if (text.isNotBlank() && containsPreviewTrigger(text)) return text
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            if (findPreviewTriggerFromNodeWithVisited(child, visited)) {
-                child.recycle()
-                return true
-            }
+            val match = findPreviewTriggerFromNodeWithVisited(child, visited)
             child.recycle()
+            if (match != null) return match
         }
-        return false
+        return null
     }
 
     private fun scanForBlockedContent(
