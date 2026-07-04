@@ -107,7 +107,12 @@ class DeepWorkSessionService : Service() {
         if (observeJob != null) return
         observeJob = serviceScope.launch {
             DeepWorkSessionManager.state.collectLatest { state ->
-                if (state.phase == SessionPhase.IDLE) {
+                // A cycle plan's break is NOT "idle" from the service's
+                // point of view — the notification and its own countdown
+                // need to keep running through it so the next work segment
+                // can auto-start. Only stop for real once there's truly
+                // nothing left: phase IDLE and no break in progress.
+                if (state.phase == SessionPhase.IDLE && !state.onBreak) {
                     if (sessionActive) {
                         stopFaceDetector()
                         sessionActive = false
@@ -115,9 +120,17 @@ class DeepWorkSessionService : Service() {
                     stopForegroundCompat()
                     stopSelf()
                 } else {
-                    if (!sessionActive) {
+                    // Face-presence tracking is a WORK-phase concept only —
+                    // it should NOT run during a break (there's no focus to
+                    // track), so it's keyed to phase specifically, not to
+                    // "is the service alive" more broadly.
+                    val wantsCamera = state.phase != SessionPhase.IDLE
+                    if (wantsCamera && !sessionActive) {
                         sessionActive = true
                         startFaceDetector()
+                    } else if (!wantsCamera && sessionActive) {
+                        sessionActive = false
+                        stopFaceDetector()
                     }
                     notificationManager().notify(NOTIFICATION_ID, buildNotification())
                 }
@@ -163,12 +176,15 @@ class DeepWorkSessionService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
-        val title = when (state.phase) {
-            SessionPhase.RUNNING -> "Focused — ${state.primaryAppName ?: ""}"
-            SessionPhase.PAUSED -> "Paused" + (state.currentPauseAppName?.let { " — $it" } ?: "")
-            SessionPhase.IDLE -> "UltraFocus"
+        val title = when {
+            state.onBreak -> "On break — cycle ${state.cycleIndex} of ${state.totalCycles}"
+            state.phase == SessionPhase.RUNNING -> "Focused — ${state.primaryAppName ?: ""}" +
+                if (state.totalCycles > 0) " (${state.cycleIndex}/${state.totalCycles})" else ""
+            state.phase == SessionPhase.PAUSED -> "Paused" + (state.currentPauseAppName?.let { " — $it" } ?: "")
+            else -> "UltraFocus"
         }
-        val remaining = (state.targetDurationMs - state.focusedTimeMs).coerceAtLeast(0)
+        val remaining = if (state.onBreak) state.breakRemainingMs
+            else (state.targetDurationMs - state.focusedTimeMs).coerceAtLeast(0)
         val pauseInfo = "${state.pauseCount} pause${if (state.pauseCount == 1) "" else "s"}"
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -178,7 +194,14 @@ class DeepWorkSessionService : Service() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
 
-        if (state.phase == SessionPhase.RUNNING) {
+        if (state.onBreak) {
+            // Native countdown works the same way for a break as for work —
+            // just no pause info, since nothing is being tracked right now.
+            builder.setUsesChronometer(true)
+                .setChronometerCountDown(true)
+                .setWhen(System.currentTimeMillis() + remaining)
+                .setContentText("Next work segment starts automatically")
+        } else if (state.phase == SessionPhase.RUNNING) {
             // Native countdown — the system ticks this on its own once set,
             // no per-second updates needed from us. Pull down notifications
             // and it's right there counting down, like a clock app's timer.
@@ -195,6 +218,7 @@ class DeepWorkSessionService : Service() {
         }
 
         when {
+            state.onBreak -> {} // nothing to pause/resume/end during a break
             state.phase == SessionPhase.RUNNING ->
                 builder.addAction(0, "Pause", actionPendingIntent(ACTION_PAUSE))
             state.phase == SessionPhase.PAUSED && state.currentPauseReason == PauseReason.MANUAL ->
@@ -216,10 +240,24 @@ class DeepWorkSessionService : Service() {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
             PendingIntent.FLAG_IMMUTABLE
         )
+        // This fires from tick(), BEFORE completeSession()/startBreak() run
+        // — state still reflects the JUST-FINISHED work segment, which is
+        // exactly what's needed to phrase this correctly for a cycle plan.
+        val (title, text) = when {
+            state.totalCycles > 0 && state.cycleIndex < state.totalCycles ->
+                "Cycle ${state.cycleIndex} of ${state.totalCycles} complete" to
+                    "${state.primaryAppName ?: "Session"} · break starting now."
+            state.totalCycles > 0 ->
+                "All ${state.totalCycles} cycles complete — $targetStr" to
+                    "${state.primaryAppName ?: "Session"} · final break starting now."
+            else ->
+                "Session complete — $targetStr" to
+                    "${state.primaryAppName ?: "Session"} · target reached, session ended."
+        }
         val notification = NotificationCompat.Builder(this, TARGET_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("Session complete — $targetStr")
-            .setContentText("${state.primaryAppName ?: "Session"} · target reached, session ended.")
+            .setContentTitle(title)
+            .setContentText(text)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setAutoCancel(true)

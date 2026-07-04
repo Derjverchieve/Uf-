@@ -20,7 +20,17 @@ data class DeepWorkUiState(
     val pauseCount: Int = 0,
     val currentPauseReason: PauseReason? = null,
     val currentPauseAppName: String? = null,
-    val sessionStartTime: Long = 0L
+    val sessionStartTime: Long = 0L,
+    // Cycle-plan fields — independent of `phase`. onBreak=true implies
+    // phase==IDLE (no FocusSession is running) but a scheduled multi-cycle
+    // plan is mid-sequence, waiting out a break before the next work
+    // segment auto-starts. cycleIndex/totalCycles are ALSO populated during
+    // the WORK phase of a cycle plan (so the live card can show "Cycle 2 of
+    // 4" while working, not just during break). Both are 0 outside any plan.
+    val onBreak: Boolean = false,
+    val breakRemainingMs: Long = 0L,
+    val cycleIndex: Int = 0,
+    val totalCycles: Int = 0
 )
 
 data class AppBreakItem(

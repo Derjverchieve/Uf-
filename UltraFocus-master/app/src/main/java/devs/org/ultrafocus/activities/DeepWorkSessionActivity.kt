@@ -91,6 +91,8 @@ class DeepWorkSessionActivity : AppCompatActivity() {
 
     private var selectedAppPackage: String? = null
     private var selectedAppName: String? = null
+    private var selectedCycleCount: Int = DeepWorkPrefs.MAX_CYCLES
+    private var lastShownSummaryId: Long? = null
 
     private lateinit var pauseLogAdapter: PauseEventAdapter
     private lateinit var breakdownAdapter: PauseEventAdapter
@@ -157,6 +159,15 @@ class DeepWorkSessionActivity : AppCompatActivity() {
             binding.txtPrimaryAppName.text = name
         }
         binding.inputTargetMinutes.setText(DeepWorkPrefs.getLastTargetMinutes(this).toString())
+
+        binding.switchCycles.isChecked = DeepWorkPrefs.getCyclesEnabled(this)
+        binding.groupCycleOptions.visibility =
+            if (binding.switchCycles.isChecked) android.view.View.VISIBLE else android.view.View.GONE
+        selectedCycleCount = DeepWorkPrefs.getCyclesCount(this)
+        updateCycleCountButtonStyles()
+        binding.inputBreakMinutes.setText(DeepWorkPrefs.getBreakMinutes(this).toString())
+        updateStartButtonText()
+
         updateStartButtonEnabled()
     }
 
@@ -178,6 +189,16 @@ class DeepWorkSessionActivity : AppCompatActivity() {
         binding.btnPreset25.setOnClickListener { binding.inputTargetMinutes.setText("25") }
         binding.btnPreset45.setOnClickListener { binding.inputTargetMinutes.setText("45") }
         binding.btnPreset60.setOnClickListener { binding.inputTargetMinutes.setText("60") }
+
+        binding.switchCycles.setOnCheckedChangeListener { _, checked ->
+            binding.groupCycleOptions.visibility = if (checked) android.view.View.VISIBLE else android.view.View.GONE
+            DeepWorkPrefs.saveCyclesEnabled(this, checked)
+            updateStartButtonText()
+        }
+
+        binding.btnCycles2.setOnClickListener { setSelectedCycleCount(2) }
+        binding.btnCycles3.setOnClickListener { setSelectedCycleCount(3) }
+        binding.btnCycles4.setOnClickListener { setSelectedCycleCount(4) }
 
         binding.txtExportCsv.setOnClickListener {
             exportLauncher.launch("ultrafocus_deep_work_sessions.csv")
@@ -220,6 +241,29 @@ class DeepWorkSessionActivity : AppCompatActivity() {
         // moment where a manual End would be both allowed and meaningful.
     }
 
+    private fun setSelectedCycleCount(count: Int) {
+        selectedCycleCount = count
+        DeepWorkPrefs.saveCyclesCount(this, count)
+        updateCycleCountButtonStyles()
+    }
+
+    private fun updateCycleCountButtonStyles() {
+        val buttons = mapOf(2 to binding.btnCycles2, 3 to binding.btnCycles3, 4 to binding.btnCycles4)
+        buttons.forEach { (count, btn) ->
+            if (count == selectedCycleCount) {
+                btn.setBackgroundColor(getColor(devs.org.ultrafocus.R.color.primary))
+                btn.setTextColor(getColor(android.R.color.white))
+            } else {
+                btn.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                btn.setTextColor(getColor(devs.org.ultrafocus.R.color.text_primary))
+            }
+        }
+    }
+
+    private fun updateStartButtonText() {
+        binding.btnStartSession.text = if (binding.switchCycles.isChecked) "Start Cycle Plan" else "Start Session"
+    }
+
     private fun startSessionFromInputs() {
         val pkg = selectedAppPackage
         val name = selectedAppName
@@ -241,6 +285,38 @@ class DeepWorkSessionActivity : AppCompatActivity() {
             return
         }
         DeepWorkPrefs.saveLastTargetMinutes(this, minutes)
+
+        if (binding.switchCycles.isChecked) {
+            val breakMinutes = binding.inputBreakMinutes.text.toString().toIntOrNull()
+            if (breakMinutes == null || breakMinutes <= 0) {
+                Toast.makeText(this, "Enter a break duration in minutes.", Toast.LENGTH_SHORT).show()
+                return
+            }
+            if (breakMinutes < DeepWorkPrefs.MIN_BREAK_MINUTES || breakMinutes > DeepWorkPrefs.MAX_BREAK_MINUTES) {
+                Toast.makeText(
+                    this,
+                    "Break must be ${DeepWorkPrefs.MIN_BREAK_MINUTES}–${DeepWorkPrefs.MAX_BREAK_MINUTES} minutes.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+            DeepWorkPrefs.saveBreakMinutes(this, breakMinutes)
+
+            DeepWorkSessionManager.startCyclePlan(pkg, name, minutes, breakMinutes, selectedCycleCount)
+
+            val intent = Intent(this, DeepWorkSessionService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+
+            val worstCaseWork = minutes * selectedCycleCount
+            val worstCaseBreak = breakMinutes * selectedCycleCount
+            Toast.makeText(
+                this,
+                "Cycle plan locked — $selectedCycleCount× ($minutes min work + $breakMinutes min break)." +
+                    " Total: ${worstCaseWork + worstCaseBreak} min.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
 
         DeepWorkSessionManager.startSession(pkg, name, TimeUnit.MINUTES.toMillis(minutes.toLong()))
 
@@ -299,17 +375,25 @@ class DeepWorkSessionActivity : AppCompatActivity() {
 
     private fun render(state: devs.org.ultrafocus.model.DeepWorkUiState) {
         // Kiosk is tied directly to session phase now — no separate toggle.
-        binding.txtKioskStatus.text = if (state.phase != SessionPhase.IDLE) "Active" else "Ready"
+        // A break still counts as "active" here even though phase is IDLE.
+        binding.txtKioskStatus.text = if (state.phase != SessionPhase.IDLE || state.onBreak) "Active" else "Ready"
+
+        if (state.onBreak) {
+            renderBreak(state)
+            return
+        }
 
         when (state.phase) {
             SessionPhase.IDLE -> {
                 binding.cardLive.visibility = android.view.View.GONE
+                binding.cardBreak.visibility = android.view.View.GONE
                 binding.cardSetup.visibility = android.view.View.VISIBLE
                 binding.groupPauseLog.visibility = android.view.View.GONE
                 pauseLogJob?.cancel()
             }
             SessionPhase.RUNNING, SessionPhase.PAUSED -> {
                 binding.cardSetup.visibility = android.view.View.GONE
+                binding.cardBreak.visibility = android.view.View.GONE
                 binding.cardLive.visibility = android.view.View.VISIBLE
                 binding.groupSummary.visibility = android.view.View.GONE
                 binding.groupPauseLog.visibility = android.view.View.VISIBLE
@@ -320,6 +404,13 @@ class DeepWorkSessionActivity : AppCompatActivity() {
                 // would be both allowed and meaningful. See DeepWorkSessionManager.tick.
                 binding.btnEndSession.isEnabled = false
                 binding.btnEndSession.alpha = 0.5f
+
+                if (state.totalCycles > 0) {
+                    binding.txtCycleProgress.visibility = android.view.View.VISIBLE
+                    binding.txtCycleProgress.text = "Cycle ${state.cycleIndex} of ${state.totalCycles}"
+                } else {
+                    binding.txtCycleProgress.visibility = android.view.View.GONE
+                }
 
                 if (state.phase == SessionPhase.RUNNING) {
                     binding.txtLiveState.text = "Focused — ${state.primaryAppName}"
@@ -357,6 +448,22 @@ class DeepWorkSessionActivity : AppCompatActivity() {
         }
     }
 
+    private fun renderBreak(state: devs.org.ultrafocus.model.DeepWorkUiState) {
+        binding.cardSetup.visibility = android.view.View.GONE
+        binding.cardLive.visibility = android.view.View.GONE
+        binding.groupSummary.visibility = android.view.View.GONE
+        binding.groupPauseLog.visibility = android.view.View.GONE
+        pauseLogJob?.cancel(); pauseLogJob = null
+        binding.cardBreak.visibility = android.view.View.VISIBLE
+
+        binding.txtBreakCycleProgress.text = "Cycle ${state.cycleIndex} of ${state.totalCycles} complete"
+        binding.txtBreakTimer.text = DurationFormatter.formatClock(state.breakRemainingMs)
+        binding.txtBreakNextUp.text = if (state.cycleIndex >= state.totalCycles)
+            "Last break — the plan ends when this hits 0:00."
+        else
+            "Next work segment starts automatically."
+    }
+
     private fun observeLivePauseLog(sessionId: Long) {
         if (pauseLogJob != null) return
         pauseLogJob = lifecycleScope.launch {
@@ -375,30 +482,47 @@ class DeepWorkSessionActivity : AppCompatActivity() {
 
     private fun observeSummary() {
         lifecycleScope.launch {
-            DeepWorkSessionManager.lastSummary.collectLatest { summary ->
-                if (summary == null) return@collectLatest
-                if (DeepWorkSessionManager.state.value.phase != SessionPhase.IDLE) return@collectLatest
-                pauseLogJob?.cancel(); pauseLogJob = null
-                binding.cardLive.visibility = android.view.View.GONE
-                binding.groupPauseLog.visibility = android.view.View.GONE
-                binding.cardSetup.visibility = android.view.View.VISIBLE
-                binding.groupSummary.visibility = android.view.View.VISIBLE
+            // combine (not just observing lastSummary alone) matters here:
+            // for a cycle plan, EVERY completed cycle assigns a fresh
+            // lastSummary value, but we only want to show it once, at the
+            // very end of the WHOLE plan — which happens after a TRAILING
+            // BREAK, with no further lastSummary assignment at that exact
+            // moment. Watching state too means the "break just ended" state
+            // change re-evaluates this against whatever summary is already
+            // sitting there, instead of that final summary being silently
+            // missed because nothing re-emitted it.
+            kotlinx.coroutines.flow.combine(
+                DeepWorkSessionManager.state,
+                DeepWorkSessionManager.lastSummary
+            ) { state, summary -> state to summary }
+                .collectLatest { (state, summary) ->
+                    if (summary == null) return@collectLatest
+                    if (state.phase != SessionPhase.IDLE || state.onBreak) return@collectLatest
+                    if (summary.sessionId == lastShownSummaryId) return@collectLatest
+                    lastShownSummaryId = summary.sessionId
 
-                binding.txtSummaryScore.text = summary.focusScore.toString()
-                binding.txtSummaryHeadline.text =
-                    if (summary.wasCancelled) "${summary.primaryAppName} · cancelled" else summary.primaryAppName
-                binding.txtSummaryStats.text = buildString {
-                    append("Wall clock: ${DurationFormatter.formatCompact(summary.wallClockMs)}\n")
-                    append("Focused: ${DurationFormatter.formatCompact(summary.focusedTimeMs)}\n")
-                    append("Paused: ${DurationFormatter.formatCompact(summary.pauseTimeMs)} (${summary.pauseCount} breaks)\n")
-                    append("Avg focus segment: ${DurationFormatter.formatCompact(summary.averageFocusSegmentMs)}")
+                    pauseLogJob?.cancel(); pauseLogJob = null
+                    binding.cardLive.visibility = android.view.View.GONE
+                    binding.cardBreak.visibility = android.view.View.GONE
+                    binding.groupPauseLog.visibility = android.view.View.GONE
+                    binding.cardSetup.visibility = android.view.View.VISIBLE
+                    binding.groupSummary.visibility = android.view.View.VISIBLE
+
+                    binding.txtSummaryScore.text = summary.focusScore.toString()
+                    binding.txtSummaryHeadline.text =
+                        if (summary.wasCancelled) "${summary.primaryAppName} · cancelled" else summary.primaryAppName
+                    binding.txtSummaryStats.text = buildString {
+                        append("Wall clock: ${DurationFormatter.formatCompact(summary.wallClockMs)}\n")
+                        append("Focused: ${DurationFormatter.formatCompact(summary.focusedTimeMs)}\n")
+                        append("Paused: ${DurationFormatter.formatCompact(summary.pauseTimeMs)} (${summary.pauseCount} breaks)\n")
+                        append("Avg focus segment: ${DurationFormatter.formatCompact(summary.averageFocusSegmentMs)}")
+                    }
+
+                    val breakdownRows = summary.breakdownByApp.map { PauseRow(it.appName, it.totalMs) }
+                    breakdownAdapter.submitList(breakdownRows)
+                    binding.txtBreakdownHeader.visibility =
+                        if (breakdownRows.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
                 }
-
-                val breakdownRows = summary.breakdownByApp.map { PauseRow(it.appName, it.totalMs) }
-                breakdownAdapter.submitList(breakdownRows)
-                binding.txtBreakdownHeader.visibility =
-                    if (breakdownRows.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
-            }
         }
     }
 
@@ -470,7 +594,8 @@ class DeepWorkSessionActivity : AppCompatActivity() {
     }
 
     private suspend fun showHistorySummary(session: FocusSession) {
-        if (DeepWorkSessionManager.state.value.phase != SessionPhase.IDLE) {
+        val current = DeepWorkSessionManager.state.value
+        if (current.phase != SessionPhase.IDLE || current.onBreak) {
             Toast.makeText(this, "Finish the current session first.", Toast.LENGTH_SHORT).show()
             return
         }
@@ -502,6 +627,7 @@ class DeepWorkSessionActivity : AppCompatActivity() {
         val wallClock = (session.endTime ?: session.startTime) - session.startTime
 
         binding.cardLive.visibility = android.view.View.GONE
+        binding.cardBreak.visibility = android.view.View.GONE
         binding.groupPauseLog.visibility = android.view.View.GONE
         binding.cardSetup.visibility = android.view.View.VISIBLE
         binding.groupSummary.visibility = android.view.View.VISIBLE

@@ -86,6 +86,24 @@ object DeepWorkSessionManager {
         val appName: String?
     )
 
+    // A scheduled work+break sequence. Lives entirely in memory — does NOT
+    // persist across process death/reboot on purpose: reboot is the
+    // deliberate, accepted escape hatch for the whole hard-lock feature, and
+    // a cycle plan surviving a reboot would undermine that. If the process
+    // dies mid-plan, whatever work segment was RUNNING still gets finalized
+    // normally by recoverOrphanedSession() on next launch, but the plan
+    // itself doesn't resume — the person lands on an ordinary idle screen.
+    private data class CyclePlan(
+        val primaryAppPackage: String,
+        val primaryAppName: String,
+        val workMinutes: Int,
+        val breakMinutes: Int,
+        val totalCycles: Int,
+        val currentCycleIndex: Int
+    )
+
+    private var activeCyclePlan: CyclePlan? = null
+
     private const val GRACE_PERIOD_MS = 10_000L
     private const val SUB_SWITCH_GRACE_MS = 3_000L
     private const val CHECKPOINT_INTERVAL_TICKS = 30 // checkpoint to DB roughly every ~30s while running
@@ -207,7 +225,7 @@ object DeepWorkSessionManager {
         openNewPause(System.currentTimeMillis(), PauseReason.APP_SWITCH, appPackage = null, appName = "Screen off")
     }
 
-    fun hasActiveSession(): Boolean = _state.value.phase != SessionPhase.IDLE
+    fun hasActiveSession(): Boolean = _state.value.phase != SessionPhase.IDLE || _state.value.onBreak
 
     // ── Crash / process-death recovery ──────────────────────────────────────
 
@@ -244,7 +262,48 @@ object DeepWorkSessionManager {
     // ── Public controls (called from the UI / service) ──────────────────────
 
     fun startSession(primaryAppPackage: String, primaryAppName: String, targetDurationMs: Long) {
-        if (!initialized || _state.value.phase != SessionPhase.IDLE) return
+        if (!initialized || _state.value.phase != SessionPhase.IDLE || _state.value.onBreak) return
+        activeCyclePlan = null
+        startWorkSegment(primaryAppPackage, primaryAppName, targetDurationMs, cycleIndex = 0, totalCycles = 0)
+    }
+
+    /**
+     * Schedules a work+break sequence: totalCycles repetitions of
+     * (workMinutes of locked focus, then breakMinutes fully unlocked), back
+     * to back, with no manual step needed between segments. The whole
+     * sequence carries the SAME hard lock as a single session — can't be
+     * cancelled until it's over — just extended across every cycle instead
+     * of one. Bounds are re-validated here defensively even though the
+     * caller (DeepWorkSessionActivity) already checks them.
+     */
+    fun startCyclePlan(primaryAppPackage: String, primaryAppName: String, workMinutes: Int, breakMinutes: Int, totalCycles: Int) {
+        if (!initialized || _state.value.phase != SessionPhase.IDLE || _state.value.onBreak) return
+        val plan = CyclePlan(
+            primaryAppPackage = primaryAppPackage,
+            primaryAppName = primaryAppName,
+            workMinutes = workMinutes.coerceIn(1, DeepWorkPrefs.MAX_TARGET_MINUTES),
+            breakMinutes = breakMinutes.coerceIn(DeepWorkPrefs.MIN_BREAK_MINUTES, DeepWorkPrefs.MAX_BREAK_MINUTES),
+            totalCycles = totalCycles.coerceIn(DeepWorkPrefs.MIN_CYCLES, DeepWorkPrefs.MAX_CYCLES),
+            currentCycleIndex = 1
+        )
+        activeCyclePlan = plan
+        startWorkSegment(
+            plan.primaryAppPackage, plan.primaryAppName,
+            plan.workMinutes * 60_000L, plan.currentCycleIndex, plan.totalCycles
+        )
+    }
+
+    // Shared by both startSession (cycleIndex=0, totalCycles=0 — "not part
+    // of a plan") and startCyclePlan/advanceCyclePlanAfterBreak (cycleIndex
+    // 1-based within an active plan). Deliberately does NOT touch
+    // activeCyclePlan itself — callers own that decision.
+    private fun startWorkSegment(
+        primaryAppPackage: String,
+        primaryAppName: String,
+        targetDurationMs: Long,
+        cycleIndex: Int,
+        totalCycles: Int
+    ) {
         managerScope.launch {
             val now = System.currentTimeMillis()
             val session = FocusSession(
@@ -275,7 +334,9 @@ object DeepWorkSessionManager {
                 primaryAppPackage = primaryAppPackage,
                 primaryAppName = primaryAppName,
                 targetDurationMs = targetDurationMs,
-                sessionStartTime = now
+                sessionStartTime = now,
+                cycleIndex = cycleIndex,
+                totalCycles = totalCycles
             )
 
             startTicker()
@@ -684,7 +745,10 @@ object DeepWorkSessionManager {
     }
 
     private fun tick() {
-        if (_state.value.phase == SessionPhase.IDLE) return
+        if (_state.value.phase == SessionPhase.IDLE) {
+            if (_state.value.onBreak) tickBreak(_state.value)
+            return
+        }
 
         // Ground-truth correction, before anything else this tick — see the
         // field doc on groundTruthProvider for why this needs to run first.
@@ -708,10 +772,19 @@ object DeepWorkSessionManager {
         // notification/vibration), then finalize immediately. This is also
         // what fully releases kiosk mode, since kiosk is now tied directly to
         // session phase (see BlockerAccessibilityService's phase-observer).
+        //
+        // If this segment is part of a cycle plan, snapshot the plan BEFORE
+        // completeSession() runs (it doesn't touch activeCyclePlan itself,
+        // but reading it first keeps the two steps clearly separate), then
+        // immediately start the break — a plan releases kiosk exactly the
+        // same way a finished single session does, it just re-locks for the
+        // next segment once the break's own countdown reaches zero.
         if (!targetReachedFired && session.targetDurationMs > 0 && liveFocused >= session.targetDurationMs) {
             targetReachedFired = true
             onTargetReached?.invoke()
+            val plan = activeCyclePlan
             completeSession()
+            if (plan != null) startBreak(plan)
             return
         }
 
@@ -732,6 +805,62 @@ object DeepWorkSessionManager {
             lastFocusStartTimestamp = now
             enqueueWrite { currentSession?.let { repository.updateSession(it) } }
         }
+    }
+
+    // ── Cycle-plan break handling ────────────────────────────────────────
+    // Breaks are NOT a FocusSession — they're not "focus time" and don't
+    // belong in the leaderboard/analytics. They're tracked purely as extra
+    // fields on DeepWorkUiState (onBreak/breakRemainingMs/cycleIndex/
+    // totalCycles) riding on top of phase==IDLE. This is deliberate: it
+    // means BlockerAccessibilityService's kiosk guard (which triggers on
+    // phase != IDLE) needs ZERO changes to correctly NOT lock during a
+    // break — kiosk is fully released, exactly like ordinary idle time,
+    // for the whole break. What stays true throughout — work AND break — is
+    // that there's no UI control anywhere to cancel the plan; the only
+    // thing a break's countdown can do is reach zero and auto-start the
+    // next work segment (or end the plan, on the last cycle).
+
+    private fun startBreak(plan: CyclePlan) {
+        _state.value = DeepWorkUiState(
+            onBreak = true,
+            breakRemainingMs = plan.breakMinutes * 60_000L,
+            cycleIndex = plan.currentCycleIndex,
+            totalCycles = plan.totalCycles,
+            primaryAppPackage = plan.primaryAppPackage,
+            primaryAppName = plan.primaryAppName
+        )
+        // completeSession() (via finalizeSession) just cancelled the ticker
+        // — restart it so the break countdown actually progresses.
+        startTicker()
+    }
+
+    private fun tickBreak(state: DeepWorkUiState) {
+        val plan = activeCyclePlan
+        if (plan == null) {
+            // Shouldn't happen, but don't get stuck if it does.
+            tickerJob?.cancel(); tickerJob = null
+            _state.value = DeepWorkUiState()
+            return
+        }
+        val remaining = state.breakRemainingMs - 1000L
+        if (remaining <= 0L) {
+            advanceCyclePlanAfterBreak(plan)
+        } else {
+            _state.value = state.copy(breakRemainingMs = remaining)
+        }
+    }
+
+    private fun advanceCyclePlanAfterBreak(plan: CyclePlan) {
+        if (plan.currentCycleIndex >= plan.totalCycles) {
+            // That was the last cycle's break — the whole plan is done.
+            activeCyclePlan = null
+            tickerJob?.cancel(); tickerJob = null
+            _state.value = DeepWorkUiState()
+            return
+        }
+        val nextIndex = plan.currentCycleIndex + 1
+        activeCyclePlan = plan.copy(currentCycleIndex = nextIndex)
+        startWorkSegment(plan.primaryAppPackage, plan.primaryAppName, plan.workMinutes * 60_000L, nextIndex, plan.totalCycles)
     }
 
     private fun resolveAppName(packageName: String): String {
