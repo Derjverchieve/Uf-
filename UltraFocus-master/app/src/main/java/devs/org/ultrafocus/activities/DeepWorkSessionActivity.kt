@@ -264,6 +264,23 @@ class DeepWorkSessionActivity : AppCompatActivity() {
         binding.btnStartSession.text = if (binding.switchCycles.isChecked) "Start Cycle Plan" else "Start Session"
     }
 
+    // Same launch pattern KioskOverlayManager already uses for its
+    // quick-switch tile. Called from a direct user tap (the Start button),
+    // so this is always safe — Android only restricts starting an activity
+    // from a BACKGROUND context, and we're squarely in the foreground here.
+    // Deliberately NOT reused for cycle-to-cycle transitions (after a
+    // break ends): that call would come from DeepWorkSessionManager while
+    // the app may not be in the foreground at all, which modern Android
+    // generally blocks outright. Doing that reliably needs a full-screen
+    // notification intent instead — a bigger, separate change.
+    private fun launchPrimaryApp(pkg: String) {
+        try {
+            val intent = packageManager.getLaunchIntentForPackage(pkg)
+                ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (intent != null) startActivity(intent)
+        } catch (_: Exception) {}
+    }
+
     private fun startSessionFromInputs() {
         val pkg = selectedAppPackage
         val name = selectedAppName
@@ -306,6 +323,7 @@ class DeepWorkSessionActivity : AppCompatActivity() {
 
             val intent = Intent(this, DeepWorkSessionService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+            launchPrimaryApp(pkg)
 
             val worstCaseWork = minutes * selectedCycleCount
             val worstCaseBreak = breakMinutes * selectedCycleCount
@@ -322,8 +340,9 @@ class DeepWorkSessionActivity : AppCompatActivity() {
 
         val intent = Intent(this, DeepWorkSessionService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+        launchPrimaryApp(pkg)
 
-        Toast.makeText(this, "Session locked — switch to $name now. Ends automatically at 0:00.", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, "Session locked — ends automatically at 0:00.", Toast.LENGTH_LONG).show()
     }
 
     // ── App picker ───────────────────────────────────────────────────────

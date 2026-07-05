@@ -680,6 +680,16 @@ object DeepWorkSessionManager {
             }
             repository.updateSession(finalSession)
             _lastSummary.value = buildSummary(finalSession, status, now)
+
+            // Auto-export after every ORDINARY (non-plan) session. Cycle
+            // plans export once instead, when the WHOLE plan finishes — see
+            // advanceCyclePlanAfterBreak. activeCyclePlan is non-null for
+            // every cycle segment (intermediate or final; it isn't cleared
+            // until the trailing break ends), so checking it here correctly
+            // limits this to standalone sessions only.
+            if (activeCyclePlan == null) {
+                managerScope.launch(Dispatchers.IO) { DeepWorkExportManager.autoExportBackup(appContext) }
+            }
         }
     }
 
@@ -856,6 +866,9 @@ object DeepWorkSessionManager {
             activeCyclePlan = null
             tickerJob?.cancel(); tickerJob = null
             _state.value = DeepWorkUiState()
+            // One export for the whole plan, here, rather than one per
+            // cycle — see the matching comment in finalizeSession.
+            managerScope.launch(Dispatchers.IO) { DeepWorkExportManager.autoExportBackup(appContext) }
             return
         }
         val nextIndex = plan.currentCycleIndex + 1
