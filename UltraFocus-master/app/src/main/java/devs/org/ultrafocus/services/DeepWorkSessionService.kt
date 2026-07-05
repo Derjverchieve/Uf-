@@ -42,6 +42,7 @@ class DeepWorkSessionService : Service() {
         private const val NOTIFICATION_ID = 1010
         private const val TARGET_CHANNEL_ID = "UltraFocusTargetReached"
         private const val TARGET_NOTIFICATION_ID = 1011
+        private const val SEGMENT_START_NOTIFICATION_ID = 1012
         private val ALARM_PATTERN = longArrayOf(0, 400, 200, 400, 200, 400)
     }
 
@@ -53,6 +54,7 @@ class DeepWorkSessionService : Service() {
     override fun onCreate() {
         super.onCreate()
         DeepWorkSessionManager.onTargetReached = { fireTargetReachedAlert() }
+        DeepWorkSessionManager.onWorkSegmentStarted = { fireWorkSegmentStartAlert() }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -267,6 +269,52 @@ class DeepWorkSessionService : Service() {
         vibrate()
     }
 
+    /**
+     * Fires every time a work segment starts (see
+     * DeepWorkSessionManager.onWorkSegmentStarted) — the very first one,
+     * every cycle transition after a break, and a boot-recovery resume.
+     * The very first, manually-started segment ALSO gets launched directly
+     * from DeepWorkSessionActivity's Start button tap (a live gesture,
+     * always reliable); this notification fires for that one too, harmlessly
+     * redundant with the direct launch. For every OTHER case there is no
+     * preceding gesture at all, and a full-screen intent is the only
+     * Android-sanctioned way to launch an activity from that kind of
+     * background context — the same mechanism alarm-clock and incoming-call
+     * apps rely on.
+     *
+     * Known limitation: on Android 14+ (API 34), full-screen intents need
+     * the person to separately grant "Full screen intent" access under
+     * Settings > Apps > UltraFocus if the OS doesn't allow it by default —
+     * I can't verify from here whether that's already granted on this
+     * device. It's also more reliable when the screen is off/locked (the
+     * classic alarm-clock case) than when the phone is already unlocked
+     * and in active use, where some OEM skins show a heads-up banner
+     * instead of taking over immediately.
+     */
+    private fun fireWorkSegmentStartAlert() {
+        val state = DeepWorkSessionManager.state.value
+        val pkg = state.primaryAppPackage ?: return
+        val launchIntent = packageManager.getLaunchIntentForPackage(pkg)
+            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) ?: return
+        val fullScreenPendingIntent = PendingIntent.getActivity(
+            this, 3, launchIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val title = if (state.totalCycles > 0)
+            "Cycle ${state.cycleIndex} of ${state.totalCycles} starting" else "Session starting"
+        val notification = NotificationCompat.Builder(this, TARGET_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText("Opening ${state.primaryAppName ?: "your focus app"}…")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setFullScreenIntent(fullScreenPendingIntent, true)
+            .setContentIntent(fullScreenPendingIntent)
+            .setAutoCancel(true)
+            .build()
+        notificationManager().notify(SEGMENT_START_NOTIFICATION_ID, notification)
+    }
+
     private fun vibrate() {
         try {
             val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -298,6 +346,7 @@ class DeepWorkSessionService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         DeepWorkSessionManager.onTargetReached = null
+        DeepWorkSessionManager.onWorkSegmentStarted = null
         stopFaceDetector()
         observeJob?.cancel()
         serviceScope.cancel()

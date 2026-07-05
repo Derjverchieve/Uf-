@@ -86,13 +86,15 @@ object DeepWorkSessionManager {
         val appName: String?
     )
 
-    // A scheduled work+break sequence. Lives entirely in memory — does NOT
-    // persist across process death/reboot on purpose: reboot is the
-    // deliberate, accepted escape hatch for the whole hard-lock feature, and
-    // a cycle plan surviving a reboot would undermine that. If the process
-    // dies mid-plan, whatever work segment was RUNNING still gets finalized
-    // normally by recoverOrphanedSession() on next launch, but the plan
-    // itself doesn't resume — the person lands on an ordinary idle screen.
+    // A scheduled work+break sequence. The in-memory copy here is the fast
+    // path (reads/writes work off this directly), but it's mirrored to
+    // DeepWorkPrefs on every segment transition specifically so it SURVIVES
+    // process death and reboot — see recoverOrphanedSession,
+    // resumeWorkSegmentFromRow, and resumeBreakFromPrefs. Rebooting changes
+    // nothing about when the plan (or the current segment within it) is
+    // actually free to end: work segments resume from their last honest
+    // Room checkpoint, and breaks resume against a fixed wall-clock
+    // deadline set when they started — never a fresh countdown either way.
     private data class CyclePlan(
         val primaryAppPackage: String,
         val primaryAppName: String,
@@ -158,6 +160,17 @@ object DeepWorkSessionManager {
     // notification) the moment the target is hit — kept out of the Manager
     // itself since that's an Android-specific concern, not session logic.
     var onTargetReached: (() -> Unit)? = null
+
+    // Set by DeepWorkSessionService. Fires every time a work segment
+    // begins — the very first one, every cycle-transition after a break,
+    // AND on a boot-recovery resume. The very first, manually-started
+    // segment ALSO gets launched directly and immediately from the Start
+    // button tap in DeepWorkSessionActivity (a live user gesture, always
+    // safe); this callback exists for every OTHER case, which has no
+    // preceding gesture at all and needs a full-screen-intent notification
+    // instead — the only Android-sanctioned way to launch an activity from
+    // a background context. See DeepWorkSessionService.fireWorkSegmentStartAlert.
+    var onWorkSegmentStarted: (() -> Unit)? = null
 
     // Set by BlockerAccessibilityService. Returns the package actually
     // active right now (via the accessibility windows list), independent of
@@ -231,32 +244,139 @@ object DeepWorkSessionManager {
 
     private suspend fun recoverOrphanedSession() {
         try {
-            val orphan = repository.getRunningSession() ?: return
-            val open = repository.getOpenPauseEvent(orphan.id)
-            if (open != null) {
-                repository.updatePauseEvent(
-                    open.copy(
-                        endTime = orphan.updatedAt,
-                        durationMs = (orphan.updatedAt - open.startTime).coerceAtLeast(0)
-                    )
-                )
+            val orphan = repository.getRunningSession()
+            val planActive = DeepWorkPrefs.isPlanActive(appContext)
+
+            if (orphan != null) {
+                // A work segment was RUNNING when the process died (crash,
+                // reboot, whatever caused it). Resume it exactly where its
+                // last checkpoint left off — reconstructing exact
+                // wall-clock focused time across the gap is unknowable (we
+                // have no way to know if the person was actually in the app
+                // the whole time the phone was off), so crediting or
+                // debiting a guess would be worse than honestly resuming
+                // from the last real checkpoint, same principle this
+                // function already followed before — just resuming instead
+                // of finalizing now.
+                resumeWorkSegmentFromRow(orphan, planActive)
+            } else if (planActive && DeepWorkPrefs.getPlanSegment(appContext) == "BREAK") {
+                // Process died mid-break — there's no Room row for that at
+                // all (breaks aren't a FocusSession), so there's nothing to
+                // find as an "orphan"; the break lives entirely in the
+                // persisted plan state instead.
+                resumeBreakFromPrefs()
+            } else if (planActive) {
+                // Persisted state says a plan should be active but there's
+                // no RUNNING row and no BREAK segment recorded — an
+                // inconsistent combination we can't safely resume into.
+                // Clear it rather than risk getting stuck in an undefined
+                // configuration.
+                DeepWorkPrefs.clearActivePlan(appContext)
             }
-            // We only trust what was actually persisted before the process
-            // died — honest accounting beats guessing what happened during
-            // the gap, so we close the session out at its last checkpoint
-            // rather than crediting (or penalizing) unmeasured time.
-            val score = FocusScoreCalculator.calculate(orphan.focusedTimeMs, orphan.pauseTimeMs)
-            repository.updateSession(
-                orphan.copy(
-                    endTime = orphan.updatedAt,
-                    status = SessionStatus.COMPLETED,
-                    focusScore = score
-                )
-            )
         } catch (_: Exception) {
-            // Best-effort recovery — if it fails, the orphan row just sits
-            // there as RUNNING and gets picked up next launch.
+            // Best-effort recovery — if it fails, whatever's inconsistent
+            // just doesn't resume; it doesn't take the app down with it.
         }
+    }
+
+    private fun resumeWorkSegmentFromRow(orphan: FocusSession, planActive: Boolean) {
+        val now = System.currentTimeMillis()
+        currentSession = orphan
+        openPauseEvent = null // any pause that was open died with the process too; resume as running
+        lastFocusStartTimestamp = now
+        lastSeenForegroundPackage = appContext.packageName
+        tickCount = 0
+        targetReachedFired = false
+
+        var cycleIndex = 0
+        var totalCycles = 0
+        if (planActive) {
+            DeepWorkPrefs.readActivePlan(appContext)?.let { restored ->
+                activeCyclePlan = CyclePlan(
+                    primaryAppPackage = restored.primaryAppPackage,
+                    primaryAppName = restored.primaryAppName,
+                    workMinutes = restored.workMinutes,
+                    breakMinutes = restored.breakMinutes,
+                    totalCycles = restored.totalCycles,
+                    currentCycleIndex = restored.currentCycleIndex
+                )
+                cycleIndex = restored.currentCycleIndex
+                totalCycles = restored.totalCycles
+            }
+        }
+
+        _state.value = DeepWorkUiState(
+            phase = SessionPhase.RUNNING,
+            sessionId = orphan.id,
+            primaryAppPackage = orphan.primaryAppPackage,
+            primaryAppName = orphan.primaryAppName,
+            targetDurationMs = orphan.targetDurationMs,
+            focusedTimeMs = orphan.focusedTimeMs,
+            pauseTimeMs = orphan.pauseTimeMs,
+            pauseCount = orphan.pauseCount,
+            sessionStartTime = orphan.startTime,
+            cycleIndex = cycleIndex,
+            totalCycles = totalCycles
+        )
+
+        startTicker()
+        startResumedService()
+        onWorkSegmentStarted?.invoke()
+    }
+
+    private fun resumeBreakFromPrefs() {
+        val restored = DeepWorkPrefs.readActivePlan(appContext) ?: run {
+            DeepWorkPrefs.clearActivePlan(appContext)
+            return
+        }
+        val plan = CyclePlan(
+            primaryAppPackage = restored.primaryAppPackage,
+            primaryAppName = restored.primaryAppName,
+            workMinutes = restored.workMinutes,
+            breakMinutes = restored.breakMinutes,
+            totalCycles = restored.totalCycles,
+            currentCycleIndex = restored.currentCycleIndex
+        )
+        activeCyclePlan = plan
+
+        // Anchored to the wall-clock deadline set when the break started —
+        // never a fresh countdown. Reboot any number of times and this
+        // still reads the same true remaining time (or none at all).
+        val endAt = DeepWorkPrefs.getPlanBreakEndAtMs(appContext)
+        val remaining = (endAt - System.currentTimeMillis()).coerceAtLeast(0L)
+
+        if (remaining <= 0L) {
+            // The break's own deadline already passed while the phone was
+            // off — don't grant a bonus fresh break, just move straight to
+            // whatever comes next.
+            advanceCyclePlanAfterBreak(plan)
+            return
+        }
+
+        _state.value = DeepWorkUiState(
+            onBreak = true,
+            breakRemainingMs = remaining,
+            cycleIndex = plan.currentCycleIndex,
+            totalCycles = plan.totalCycles,
+            primaryAppPackage = plan.primaryAppPackage,
+            primaryAppName = plan.primaryAppName
+        )
+        startTicker()
+        startResumedService()
+    }
+
+    // Foreground services don't restart on their own after process death —
+    // only the accessibility service and this manager's own init() do that
+    // automatically. Starting from BOOT_COMPLETED (which is how recovery
+    // gets triggered promptly after a reboot — see BootCompletedReceiver)
+    // is an explicit, Android-documented exemption from the usual
+    // background foreground-service-start restriction.
+    private fun startResumedService() {
+        try {
+            ContextCompat.startForegroundService(
+                appContext, Intent(appContext, devs.org.ultrafocus.services.DeepWorkSessionService::class.java)
+            )
+        } catch (_: Exception) {}
     }
 
     // ── Public controls (called from the UI / service) ──────────────────────
@@ -339,8 +459,27 @@ object DeepWorkSessionManager {
                 totalCycles = totalCycles
             )
 
+            // Persist enough to resume this exact segment (and the plan
+            // around it, if any) after a reboot — see recoverOrphanedSession.
+            // An ordinary (non-plan) session needs nothing extra here: the
+            // FocusSession row Room just wrote above IS its full resume
+            // state on its own.
+            val plan = activeCyclePlan
+            if (plan != null) {
+                DeepWorkPrefs.writeActiveWorkSegment(
+                    appContext,
+                    DeepWorkPrefs.PersistedCyclePlan(
+                        plan.primaryAppPackage, plan.primaryAppName,
+                        plan.workMinutes, plan.breakMinutes, plan.totalCycles, plan.currentCycleIndex
+                    )
+                )
+            } else {
+                DeepWorkPrefs.clearActivePlan(appContext)
+            }
+
             startTicker()
             evaluateForeground(lastSeenForegroundPackage!!)
+            onWorkSegmentStarted?.invoke()
         }
     }
 
@@ -831,6 +970,7 @@ object DeepWorkSessionManager {
     // next work segment (or end the plan, on the last cycle).
 
     private fun startBreak(plan: CyclePlan) {
+        val breakEndAtMs = System.currentTimeMillis() + plan.breakMinutes * 60_000L
         _state.value = DeepWorkUiState(
             onBreak = true,
             breakRemainingMs = plan.breakMinutes * 60_000L,
@@ -838,6 +978,19 @@ object DeepWorkSessionManager {
             totalCycles = plan.totalCycles,
             primaryAppPackage = plan.primaryAppPackage,
             primaryAppName = plan.primaryAppName
+        )
+        // Anchored to a wall-clock deadline, persisted immediately — see
+        // DeepWorkPrefs.writeActiveBreak's doc. Rebooting during a break
+        // can't extend it any more than rebooting during work can shorten
+        // the lock; both read back against a fixed timestamp, never a
+        // fresh countdown.
+        DeepWorkPrefs.writeActiveBreak(
+            appContext,
+            DeepWorkPrefs.PersistedCyclePlan(
+                plan.primaryAppPackage, plan.primaryAppName,
+                plan.workMinutes, plan.breakMinutes, plan.totalCycles, plan.currentCycleIndex
+            ),
+            breakEndAtMs
         )
         // completeSession() (via finalizeSession) just cancelled the ticker
         // — restart it so the break countdown actually progresses.
@@ -866,6 +1019,7 @@ object DeepWorkSessionManager {
             activeCyclePlan = null
             tickerJob?.cancel(); tickerJob = null
             _state.value = DeepWorkUiState()
+            DeepWorkPrefs.clearActivePlan(appContext)
             // One export for the whole plan, here, rather than one per
             // cycle — see the matching comment in finalizeSession.
             managerScope.launch(Dispatchers.IO) { DeepWorkExportManager.autoExportBackup(appContext) }

@@ -64,6 +64,91 @@ object DeepWorkPrefs {
     fun getBreakMinutes(context: Context): Int =
         prefs(context).getInt(KEY_BREAK_MINUTES, 15).coerceIn(MIN_BREAK_MINUTES, MAX_BREAK_MINUTES)
 
+    // ── Reboot-survival state for the active cycle plan ─────────────────
+    // An ordinary (non-plan) session needs none of this: its RUNNING
+    // FocusSession row in Room already IS its full resume state. A cycle
+    // plan needs this extra layer specifically because (a) a BREAK has no
+    // Room row at all, and (b) even a work segment's plan context (which
+    // cycle, how many total, break length) lives nowhere else. Written on
+    // every segment transition, cleared only when the whole plan ends —
+    // see DeepWorkSessionManager.recoverOrphanedSession, which is what
+    // actually reads this back after a reboot.
+
+    data class PersistedCyclePlan(
+        val primaryAppPackage: String,
+        val primaryAppName: String,
+        val workMinutes: Int,
+        val breakMinutes: Int,
+        val totalCycles: Int,
+        val currentCycleIndex: Int
+    )
+
+    private const val KEY_PLAN_ACTIVE = "plan_active"
+    private const val KEY_PLAN_PKG = "plan_pkg"
+    private const val KEY_PLAN_NAME = "plan_name"
+    private const val KEY_PLAN_WORK_MIN = "plan_work_min"
+    private const val KEY_PLAN_BREAK_MIN = "plan_break_min"
+    private const val KEY_PLAN_TOTAL_CYCLES = "plan_total_cycles"
+    private const val KEY_PLAN_CURRENT_CYCLE = "plan_current_cycle"
+    private const val KEY_PLAN_SEGMENT = "plan_segment" // "WORK" or "BREAK"
+    private const val KEY_PLAN_BREAK_END_AT = "plan_break_end_at"
+
+    fun isPlanActive(context: Context): Boolean = prefs(context).getBoolean(KEY_PLAN_ACTIVE, false)
+
+    fun getPlanSegment(context: Context): String = prefs(context).getString(KEY_PLAN_SEGMENT, "WORK") ?: "WORK"
+
+    fun getPlanBreakEndAtMs(context: Context): Long = prefs(context).getLong(KEY_PLAN_BREAK_END_AT, 0L)
+
+    fun readActivePlan(context: Context): PersistedCyclePlan? {
+        val p = prefs(context)
+        val pkg = p.getString(KEY_PLAN_PKG, null) ?: return null
+        val name = p.getString(KEY_PLAN_NAME, null) ?: return null
+        return PersistedCyclePlan(
+            primaryAppPackage = pkg,
+            primaryAppName = name,
+            workMinutes = p.getInt(KEY_PLAN_WORK_MIN, 45),
+            breakMinutes = p.getInt(KEY_PLAN_BREAK_MIN, 15),
+            totalCycles = p.getInt(KEY_PLAN_TOTAL_CYCLES, 1),
+            currentCycleIndex = p.getInt(KEY_PLAN_CURRENT_CYCLE, 1)
+        )
+    }
+
+    fun writeActiveWorkSegment(context: Context, plan: PersistedCyclePlan) {
+        prefs(context).edit()
+            .putBoolean(KEY_PLAN_ACTIVE, true)
+            .putString(KEY_PLAN_PKG, plan.primaryAppPackage)
+            .putString(KEY_PLAN_NAME, plan.primaryAppName)
+            .putInt(KEY_PLAN_WORK_MIN, plan.workMinutes)
+            .putInt(KEY_PLAN_BREAK_MIN, plan.breakMinutes)
+            .putInt(KEY_PLAN_TOTAL_CYCLES, plan.totalCycles)
+            .putInt(KEY_PLAN_CURRENT_CYCLE, plan.currentCycleIndex)
+            .putString(KEY_PLAN_SEGMENT, "WORK")
+            .apply()
+    }
+
+    // breakEndAtMs is the wall-clock timestamp the break should conclude at
+    // — computed ONCE when the break starts. Resuming after a reboot reads
+    // remaining time as (breakEndAtMs - now), never a fresh countdown, so
+    // rebooting can't extend a break any more than it can shorten a work
+    // segment.
+    fun writeActiveBreak(context: Context, plan: PersistedCyclePlan, breakEndAtMs: Long) {
+        prefs(context).edit()
+            .putBoolean(KEY_PLAN_ACTIVE, true)
+            .putString(KEY_PLAN_PKG, plan.primaryAppPackage)
+            .putString(KEY_PLAN_NAME, plan.primaryAppName)
+            .putInt(KEY_PLAN_WORK_MIN, plan.workMinutes)
+            .putInt(KEY_PLAN_BREAK_MIN, plan.breakMinutes)
+            .putInt(KEY_PLAN_TOTAL_CYCLES, plan.totalCycles)
+            .putInt(KEY_PLAN_CURRENT_CYCLE, plan.currentCycleIndex)
+            .putString(KEY_PLAN_SEGMENT, "BREAK")
+            .putLong(KEY_PLAN_BREAK_END_AT, breakEndAtMs)
+            .apply()
+    }
+
+    fun clearActivePlan(context: Context) {
+        prefs(context).edit().putBoolean(KEY_PLAN_ACTIVE, false).apply()
+    }
+
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 }
