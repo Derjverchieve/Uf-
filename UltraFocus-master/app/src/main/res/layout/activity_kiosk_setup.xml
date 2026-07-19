@@ -70,7 +70,7 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="• Sessions max out at 60 minutes\n• The phone dialer always works\n• System UI / launcher get a 10s grace, then block\n• If something goes wrong, a reboot ends the lock"
+                    android:text="• Sessions max out at 120 minutes\n• The phone dialer always works\n• System UI / launcher get a 4s grace, then block\n• If something goes wrong, a reboot ends the lock"
                     android:textSize="12sp"
                     android:lineSpacingExtra="3dp"
                     android:textColor="@color/text_hint" />

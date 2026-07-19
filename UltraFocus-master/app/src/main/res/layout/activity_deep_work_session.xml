@@ -120,7 +120,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="Max 60 minutes. Once started, the session locks until it ends — no early exit."
+                    android:text="Max 120 minutes. Once started, the session locks until it ends — no early exit."
                     android:textSize="11sp"
                     android:textColor="@color/text_hint" />
 
@@ -291,7 +291,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
-                        android:text="Min 10, max 60 minutes per break."
+                        android:text="Min 1, max 60 minutes per break."
                         android:textSize="11sp"
                         android:textColor="@color/text_hint" />
 

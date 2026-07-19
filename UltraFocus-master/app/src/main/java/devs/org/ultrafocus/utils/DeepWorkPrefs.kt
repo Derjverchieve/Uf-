@@ -12,19 +12,21 @@ object DeepWorkPrefs {
     private const val KEY_BREAK_MINUTES = "break_minutes"
 
     // Hard-lock sessions can't be ended or cancelled early, so the ceiling on
-    // how long you can lock yourself in for matters — 60 minutes keeps the
-    // worst case bounded. Single source of truth: DeepWorkSessionActivity
-    // validates against this same constant rather than a duplicated number.
-    const val MAX_TARGET_MINUTES = 60
+    // how long you can lock yourself in for matters. Single source of truth:
+    // DeepWorkSessionActivity validates against this same constant rather
+    // than a duplicated number.
+    const val MAX_TARGET_MINUTES = 120
 
     // Cycle plans chain multiple work+break pairs with the SAME hard lock
     // applied across the whole sequence — can't cancel until it's over, same
     // as a single session, just extended across all cycles. Worst case with
-    // these bounds: MAX_CYCLES × MAX_TARGET_MINUTES work (4×60=4hr) +
-    // MAX_CYCLES × MIN_BREAK_MINUTES break at the floor (4×10=40min).
+    // these bounds: MAX_CYCLES × MAX_TARGET_MINUTES work (4×120=8hr) +
+    // MAX_CYCLES × MIN_BREAK_MINUTES break at the floor (4×1=4min). The
+    // midnight failsafe (DeepWorkSessionManager.midnightCutoffMs) is the
+    // other backstop on total elapsed time, independent of these bounds.
     const val MIN_CYCLES = 2
     const val MAX_CYCLES = 4
-    const val MIN_BREAK_MINUTES = 10
+    const val MIN_BREAK_MINUTES = 1
     const val MAX_BREAK_MINUTES = 60
 
     fun saveLastPrimaryApp(context: Context, packageName: String, appName: String) {
