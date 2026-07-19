@@ -43,6 +43,7 @@ class DeepWorkSessionService : Service() {
         private const val TARGET_CHANNEL_ID = "UltraFocusTargetReached"
         private const val TARGET_NOTIFICATION_ID = 1011
         private const val SEGMENT_START_NOTIFICATION_ID = 1012
+        private const val MIDNIGHT_NOTIFICATION_ID = 1013
         private val ALARM_PATTERN = longArrayOf(0, 400, 200, 400, 200, 400)
     }
 
@@ -55,6 +56,7 @@ class DeepWorkSessionService : Service() {
         super.onCreate()
         DeepWorkSessionManager.onTargetReached = { fireTargetReachedAlert() }
         DeepWorkSessionManager.onWorkSegmentStarted = { fireWorkSegmentStartAlert() }
+        DeepWorkSessionManager.onMidnightCutoff = { fireMidnightCutoffAlert() }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -315,6 +317,25 @@ class DeepWorkSessionService : Service() {
         notificationManager().notify(SEGMENT_START_NOTIFICATION_ID, notification)
     }
 
+    /**
+     * Fires when the absolute midnight failsafe cuts a session or cycle
+     * plan short — see DeepWorkSessionManager.forceEndForMidnight. Distinct
+     * from fireTargetReachedAlert specifically so it's clear this wasn't a
+     * normal completion; whatever cycle you were on, it ended because the
+     * day rolled over, not because the plan finished on its own terms.
+     */
+    private fun fireMidnightCutoffAlert() {
+        val notification = NotificationCompat.Builder(this, TARGET_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Ended at midnight")
+            .setContentText("Your session reset for the day, as scheduled.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setAutoCancel(true)
+            .build()
+        notificationManager().notify(MIDNIGHT_NOTIFICATION_ID, notification)
+    }
+
     private fun vibrate() {
         try {
             val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -347,6 +368,7 @@ class DeepWorkSessionService : Service() {
         super.onDestroy()
         DeepWorkSessionManager.onTargetReached = null
         DeepWorkSessionManager.onWorkSegmentStarted = null
+        DeepWorkSessionManager.onMidnightCutoff = null
         stopFaceDetector()
         observeJob?.cancel()
         serviceScope.cancel()

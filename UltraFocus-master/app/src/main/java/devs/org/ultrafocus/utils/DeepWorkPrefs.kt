@@ -92,12 +92,18 @@ object DeepWorkPrefs {
     private const val KEY_PLAN_CURRENT_CYCLE = "plan_current_cycle"
     private const val KEY_PLAN_SEGMENT = "plan_segment" // "WORK" or "BREAK"
     private const val KEY_PLAN_BREAK_END_AT = "plan_break_end_at"
+    private const val KEY_PLAN_MIDNIGHT_CUTOFF = "plan_midnight_cutoff"
 
     fun isPlanActive(context: Context): Boolean = prefs(context).getBoolean(KEY_PLAN_ACTIVE, false)
 
     fun getPlanSegment(context: Context): String = prefs(context).getString(KEY_PLAN_SEGMENT, "WORK") ?: "WORK"
 
     fun getPlanBreakEndAtMs(context: Context): Long = prefs(context).getLong(KEY_PLAN_BREAK_END_AT, 0L)
+
+    // 0L (the default) means "no cutoff was ever persisted" — callers
+    // should treat that as "don't apply a midnight failsafe" rather than
+    // as a literal timestamp of Jan 1 1970.
+    fun getPlanMidnightCutoffMs(context: Context): Long = prefs(context).getLong(KEY_PLAN_MIDNIGHT_CUTOFF, 0L)
 
     fun readActivePlan(context: Context): PersistedCyclePlan? {
         val p = prefs(context)
@@ -113,7 +119,7 @@ object DeepWorkPrefs {
         )
     }
 
-    fun writeActiveWorkSegment(context: Context, plan: PersistedCyclePlan) {
+    fun writeActiveWorkSegment(context: Context, plan: PersistedCyclePlan, midnightCutoffMs: Long) {
         prefs(context).edit()
             .putBoolean(KEY_PLAN_ACTIVE, true)
             .putString(KEY_PLAN_PKG, plan.primaryAppPackage)
@@ -123,6 +129,7 @@ object DeepWorkPrefs {
             .putInt(KEY_PLAN_TOTAL_CYCLES, plan.totalCycles)
             .putInt(KEY_PLAN_CURRENT_CYCLE, plan.currentCycleIndex)
             .putString(KEY_PLAN_SEGMENT, "WORK")
+            .putLong(KEY_PLAN_MIDNIGHT_CUTOFF, midnightCutoffMs)
             .apply()
     }
 
@@ -130,8 +137,10 @@ object DeepWorkPrefs {
     // — computed ONCE when the break starts. Resuming after a reboot reads
     // remaining time as (breakEndAtMs - now), never a fresh countdown, so
     // rebooting can't extend a break any more than it can shorten a work
-    // segment.
-    fun writeActiveBreak(context: Context, plan: PersistedCyclePlan, breakEndAtMs: Long) {
+    // segment. midnightCutoffMs is the SAME value written at plan start —
+    // carried through unchanged on every segment transition so a reboot
+    // mid-break restores the original ceiling, not a recomputed one.
+    fun writeActiveBreak(context: Context, plan: PersistedCyclePlan, breakEndAtMs: Long, midnightCutoffMs: Long) {
         prefs(context).edit()
             .putBoolean(KEY_PLAN_ACTIVE, true)
             .putString(KEY_PLAN_PKG, plan.primaryAppPackage)
@@ -142,6 +151,7 @@ object DeepWorkPrefs {
             .putInt(KEY_PLAN_CURRENT_CYCLE, plan.currentCycleIndex)
             .putString(KEY_PLAN_SEGMENT, "BREAK")
             .putLong(KEY_PLAN_BREAK_END_AT, breakEndAtMs)
+            .putLong(KEY_PLAN_MIDNIGHT_CUTOFF, midnightCutoffMs)
             .apply()
     }
 

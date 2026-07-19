@@ -156,6 +156,19 @@ object DeepWorkSessionManager {
     private var screenReceiver: BroadcastReceiver? = null
     private var targetReachedFired = false
 
+    // Absolute safety ceiling, independent of the reboot-immunity above:
+    // the wall-clock timestamp — set ONCE, at the true start of a session
+    // or plan, never touched again until it fully ends — past which
+    // everything force-terminates regardless of what cycle/segment is in
+    // progress. Computed as "the next midnight after start", so it's the
+    // same fixed deadline no matter how many times the phone reboots in
+    // between; see nextMidnightAfter and forceEndForMidnight.
+    private var midnightCutoffMs: Long? = null
+
+    // Set by DeepWorkSessionService so it can show a distinct "ended at
+    // midnight" notification, rather than the usual completion one.
+    var onMidnightCutoff: (() -> Unit)? = null
+
     // Set by DeepWorkSessionService so it can fire an alert (sound/vibration/
     // notification) the moment the target is hit — kept out of the Manager
     // itself since that's an Android-specific concern, not session logic.
@@ -303,6 +316,23 @@ object DeepWorkSessionManager {
                 cycleIndex = restored.currentCycleIndex
                 totalCycles = restored.totalCycles
             }
+            midnightCutoffMs = DeepWorkPrefs.getPlanMidnightCutoffMs(appContext).takeIf { it > 0L }
+        } else {
+            // Standalone session — derive the SAME cutoff it would have had
+            // originally, straight from when it actually started. No
+            // separate persistence needed for this simpler case since Room
+            // already durably captured startTime.
+            midnightCutoffMs = nextMidnightAfter(orphan.startTime)
+        }
+
+        // The phone could have been off long enough that the cutoff already
+        // passed before we even got this far — don't resume into an
+        // already-expired state, end it right here instead.
+        midnightCutoffMs?.let { cutoff ->
+            if (now >= cutoff) {
+                forceEndForMidnight()
+                return
+            }
         }
 
         _state.value = DeepWorkUiState(
@@ -338,6 +368,16 @@ object DeepWorkSessionManager {
             currentCycleIndex = restored.currentCycleIndex
         )
         activeCyclePlan = plan
+        midnightCutoffMs = DeepWorkPrefs.getPlanMidnightCutoffMs(appContext).takeIf { it > 0L }
+
+        // Checked before anything else resumes — the phone could have been
+        // off long enough that the cutoff already passed.
+        midnightCutoffMs?.let { cutoff ->
+            if (System.currentTimeMillis() >= cutoff) {
+                forceEndForMidnight()
+                return
+            }
+        }
 
         // Anchored to the wall-clock deadline set when the break started —
         // never a fresh countdown. Reboot any number of times and this
@@ -381,9 +421,25 @@ object DeepWorkSessionManager {
 
     // ── Public controls (called from the UI / service) ──────────────────────
 
+    // The next occurrence of 00:00 local time strictly after `timestamp`.
+    // Deliberately computed once at true session/plan start and never
+    // recomputed from a later segment's own start time — see
+    // midnightCutoffMs's field doc.
+    private fun nextMidnightAfter(timestamp: Long): Long {
+        val cal = java.util.Calendar.getInstance()
+        cal.timeInMillis = timestamp
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+        cal.set(java.util.Calendar.MINUTE, 0)
+        cal.set(java.util.Calendar.SECOND, 0)
+        cal.set(java.util.Calendar.MILLISECOND, 0)
+        cal.add(java.util.Calendar.DAY_OF_YEAR, 1)
+        return cal.timeInMillis
+    }
+
     fun startSession(primaryAppPackage: String, primaryAppName: String, targetDurationMs: Long) {
         if (!initialized || _state.value.phase != SessionPhase.IDLE || _state.value.onBreak) return
         activeCyclePlan = null
+        midnightCutoffMs = nextMidnightAfter(System.currentTimeMillis())
         startWorkSegment(primaryAppPackage, primaryAppName, targetDurationMs, cycleIndex = 0, totalCycles = 0)
     }
 
@@ -407,6 +463,7 @@ object DeepWorkSessionManager {
             currentCycleIndex = 1
         )
         activeCyclePlan = plan
+        midnightCutoffMs = nextMidnightAfter(System.currentTimeMillis())
         startWorkSegment(
             plan.primaryAppPackage, plan.primaryAppName,
             plan.workMinutes * 60_000L, plan.currentCycleIndex, plan.totalCycles
@@ -471,7 +528,8 @@ object DeepWorkSessionManager {
                     DeepWorkPrefs.PersistedCyclePlan(
                         plan.primaryAppPackage, plan.primaryAppName,
                         plan.workMinutes, plan.breakMinutes, plan.totalCycles, plan.currentCycleIndex
-                    )
+                    ),
+                    midnightCutoffMs ?: 0L
                 )
             } else {
                 DeepWorkPrefs.clearActivePlan(appContext)
@@ -894,6 +952,15 @@ object DeepWorkSessionManager {
     }
 
     private fun tick() {
+        // Absolute failsafe, checked before anything else — applies during
+        // work AND break alike. See midnightCutoffMs's field doc.
+        midnightCutoffMs?.let { cutoff ->
+            if (System.currentTimeMillis() >= cutoff) {
+                forceEndForMidnight()
+                return
+            }
+        }
+
         if (_state.value.phase == SessionPhase.IDLE) {
             if (_state.value.onBreak) tickBreak(_state.value)
             return
@@ -990,7 +1057,8 @@ object DeepWorkSessionManager {
                 plan.primaryAppPackage, plan.primaryAppName,
                 plan.workMinutes, plan.breakMinutes, plan.totalCycles, plan.currentCycleIndex
             ),
-            breakEndAtMs
+            breakEndAtMs,
+            midnightCutoffMs ?: 0L
         )
         // completeSession() (via finalizeSession) just cancelled the ticker
         // — restart it so the break countdown actually progresses.
@@ -1028,6 +1096,37 @@ object DeepWorkSessionManager {
         val nextIndex = plan.currentCycleIndex + 1
         activeCyclePlan = plan.copy(currentCycleIndex = nextIndex)
         startWorkSegment(plan.primaryAppPackage, plan.primaryAppName, plan.workMinutes * 60_000L, nextIndex, plan.totalCycles)
+    }
+
+    /**
+     * Called once the absolute midnight ceiling is crossed, work or break,
+     * however many cycles remain — the whole thing ends here, full stop,
+     * not just the current segment. "No matter what" means no matter what:
+     * a bug corrupting the cycle count, a plan that happens to span past
+     * midnight under ordinary bounds, all of it ends here regardless.
+     */
+    private fun forceEndForMidnight() {
+        midnightCutoffMs = null
+        val wasOnBreak = _state.value.onBreak
+        if (!wasOnBreak && currentSession != null) {
+            // A work segment was running — finalize it exactly like a
+            // normal completion, crediting whatever was honestly
+            // checkpointed. activeCyclePlan is cleared FIRST so
+            // finalizeSession's own bookkeeping (including its auto-export
+            // check) correctly treats this as "nothing further to resume
+            // into", the same as any other final segment.
+            activeCyclePlan = null
+            finalizeSession(SessionStatus.COMPLETED)
+        } else {
+            // On break, or nothing currently running — nothing to finalize
+            // as a FocusSession; just fully clear everything.
+            activeCyclePlan = null
+            tickerJob?.cancel(); tickerJob = null
+            _state.value = DeepWorkUiState()
+            managerScope.launch(Dispatchers.IO) { DeepWorkExportManager.autoExportBackup(appContext) }
+        }
+        DeepWorkPrefs.clearActivePlan(appContext)
+        onMidnightCutoff?.invoke()
     }
 
     private fun resolveAppName(packageName: String): String {
