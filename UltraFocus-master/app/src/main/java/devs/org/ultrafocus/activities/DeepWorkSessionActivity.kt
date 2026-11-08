@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -31,6 +32,7 @@ import devs.org.ultrafocus.utils.DeepWorkExportManager
 import devs.org.ultrafocus.utils.DeepWorkImportManager
 import devs.org.ultrafocus.utils.DeepWorkSessionManager
 import devs.org.ultrafocus.utils.DurationFormatter
+import devs.org.ultrafocus.utils.FocusApps
 import devs.org.ultrafocus.utils.FocusScoreCalculator
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -89,8 +91,9 @@ class DeepWorkSessionActivity : AppCompatActivity() {
         }
     }
 
-    private var selectedAppPackage: String? = null
-    private var selectedAppName: String? = null
+    // Up to FocusApps.MAX_APPS focus apps as (package, label), in pick order.
+    // The FIRST one is the primary: it's the one launched when the session starts.
+    private var selectedApps: List<Pair<String, String>> = emptyList()
     private var selectedCycleCount: Int = DeepWorkPrefs.MAX_CYCLES
     private var lastShownSummaryId: Long? = null
 
@@ -151,12 +154,13 @@ class DeepWorkSessionActivity : AppCompatActivity() {
     }
 
     private fun restoreLastPrimaryApp() {
-        val pkg = DeepWorkPrefs.getLastPrimaryAppPackage(this) ?: return
-        val name = DeepWorkPrefs.getLastPrimaryAppName(this) ?: pkg
-        if (isAppInstalled(pkg)) {
-            selectedAppPackage = pkg
-            selectedAppName = name
-            binding.txtPrimaryAppName.text = name
+        val savedPkgs = DeepWorkPrefs.getLastPrimaryAppPackage(this) ?: return
+        val installed = FocusApps.packages(savedPkgs)
+            .filter { isAppInstalled(it) }
+            .take(FocusApps.MAX_APPS)
+        if (installed.isNotEmpty()) {
+            selectedApps = installed.map { it to appLabel(it) }
+            binding.txtPrimaryAppName.text = selectedAppsLabel()
         }
         binding.inputTargetMinutes.setText(DeepWorkPrefs.getLastTargetMinutes(this).toString())
 
@@ -170,6 +174,14 @@ class DeepWorkSessionActivity : AppCompatActivity() {
 
         updateStartButtonEnabled()
     }
+
+    private fun appLabel(pkg: String): String = try {
+        packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+    } catch (_: Exception) {
+        pkg
+    }
+
+    private fun selectedAppsLabel(): String = FocusApps.joinNames(selectedApps.map { it.second })
 
     private fun isAppInstalled(packageName: String): Boolean = try {
         packageManager.getApplicationInfo(packageName, 0)
@@ -282,12 +294,15 @@ class DeepWorkSessionActivity : AppCompatActivity() {
     }
 
     private fun startSessionFromInputs() {
-        val pkg = selectedAppPackage
-        val name = selectedAppName
-        if (pkg == null || name == null) {
-            Toast.makeText(this, "Choose a primary work app first.", Toast.LENGTH_SHORT).show()
+        if (selectedApps.isEmpty()) {
+            Toast.makeText(this, "Choose at least one focus app first.", Toast.LENGTH_SHORT).show()
             return
         }
+        // All focus apps travel through the existing primaryAppPackage / primaryAppName
+        // fields as joined strings ("a|b|c" / "A + B + C"), so no DB or CSV changes.
+        val pkg = FocusApps.joinPackages(selectedApps.map { it.first })
+        val name = selectedAppsLabel()
+        val launchPkg = selectedApps.first().first
         val minutes = binding.inputTargetMinutes.text.toString().toIntOrNull()
         if (minutes == null || minutes <= 0) {
             Toast.makeText(this, "Enter a target duration in minutes.", Toast.LENGTH_SHORT).show()
@@ -323,7 +338,7 @@ class DeepWorkSessionActivity : AppCompatActivity() {
 
             val intent = Intent(this, DeepWorkSessionService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
-            launchPrimaryApp(pkg)
+            launchPrimaryApp(launchPkg)
 
             val worstCaseWork = minutes * selectedCycleCount
             val worstCaseBreak = breakMinutes * selectedCycleCount
@@ -340,7 +355,7 @@ class DeepWorkSessionActivity : AppCompatActivity() {
 
         val intent = Intent(this, DeepWorkSessionService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
-        launchPrimaryApp(pkg)
+        launchPrimaryApp(launchPkg)
 
         Toast.makeText(this, "Session locked — ends automatically at 0:00.", Toast.LENGTH_LONG).show()
     }
@@ -361,25 +376,58 @@ class DeepWorkSessionActivity : AppCompatActivity() {
         }
 
         val labels = apps.map { it.second }.toTypedArray()
-        val preselected = apps.indexOfFirst { it.first == selectedAppPackage }
+        val checked = BooleanArray(apps.size) { i -> selectedApps.any { it.first == apps[i].first } }
 
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Primary work app")
-            .setSingleChoiceItems(labels, preselected) { dialog, which ->
+        // Pick order is preserved: the first app in here is the primary (launched on Start).
+        val chosen = LinkedHashMap<String, String>()
+        selectedApps.forEach { (pkg, name) -> chosen[pkg] = name }
+
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle("Focus apps (${chosen.size}/${FocusApps.MAX_APPS})")
+            .setMultiChoiceItems(labels, checked) { d, which, isChecked ->
+                val alert = d as AlertDialog
                 val (pkg, name) = apps[which]
-                selectedAppPackage = pkg
-                selectedAppName = name
-                binding.txtPrimaryAppName.text = name
-                DeepWorkPrefs.saveLastPrimaryApp(this, pkg, name)
-                updateStartButtonEnabled()
-                dialog.dismiss()
+                if (isChecked) {
+                    if (chosen.size >= FocusApps.MAX_APPS) {
+                        // Over the limit — undo the tick. The backing array has to be reset too,
+                        // otherwise the list re-ticks the row when it scrolls and recycles views.
+                        checked[which] = false
+                        alert.listView.setItemChecked(which, false)
+                        Toast.makeText(this, "Max ${FocusApps.MAX_APPS} focus apps.", Toast.LENGTH_SHORT).show()
+                        return@setMultiChoiceItems
+                    }
+                    chosen[pkg] = name
+                } else {
+                    chosen.remove(pkg)
+                }
+                alert.setTitle("Focus apps (${chosen.size}/${FocusApps.MAX_APPS})")
             }
+            .setPositiveButton("Done", null)
             .setNegativeButton("Cancel", null)
-            .show()
+            .create()
+
+        dialog.show()
+
+        // Wired after show() so an empty selection doesn't auto-dismiss the dialog.
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            if (chosen.isEmpty()) {
+                Toast.makeText(this, "Pick at least one app.", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            selectedApps = chosen.map { it.key to it.value }
+            binding.txtPrimaryAppName.text = selectedAppsLabel()
+            DeepWorkPrefs.saveLastPrimaryApp(
+                this,
+                FocusApps.joinPackages(selectedApps.map { it.first }),
+                selectedAppsLabel()
+            )
+            updateStartButtonEnabled()
+            dialog.dismiss()
+        }
     }
 
     private fun updateStartButtonEnabled() {
-        binding.btnStartSession.isEnabled = selectedAppPackage != null
+        binding.btnStartSession.isEnabled = selectedApps.isNotEmpty()
     }
 
     // ── Observers ────────────────────────────────────────────────────────

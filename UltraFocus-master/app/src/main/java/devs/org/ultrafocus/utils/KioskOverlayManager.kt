@@ -167,13 +167,16 @@ class KioskOverlayManager(private val context: Context) {
     fun show(alwaysIncludePkg: String? = null) {
         val apps = KioskPrefs.getAllowedApps(context).toMutableMap()
 
-        // Always include the active focus app so you can return to it from the tile
-        if (!alwaysIncludePkg.isNullOrBlank() && alwaysIncludePkg !in apps) {
-            try {
-                val pm = context.packageManager
-                val info = pm.getApplicationInfo(alwaysIncludePkg, 0)
-                apps[alwaysIncludePkg] = pm.getApplicationLabel(info).toString()
-            } catch (_: Exception) {}
+        // Always include every active focus app so you can return to any of them from the tile.
+        // [alwaysIncludePkg] may be several packages joined with "|" (see FocusApps).
+        FocusApps.packages(alwaysIncludePkg).forEach { pkg ->
+            if (pkg !in apps) {
+                try {
+                    val pm = context.packageManager
+                    val info = pm.getApplicationInfo(pkg, 0)
+                    apps[pkg] = pm.getApplicationLabel(info).toString()
+                } catch (_: Exception) {}
+            }
         }
 
         if (apps.isEmpty()) return

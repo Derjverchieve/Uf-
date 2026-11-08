@@ -48,7 +48,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Primary work app"
+                    android:text="Focus apps (up to 3)"
                     android:textSize="13sp"
                     android:textColor="@color/text_secondary"
                     android:layout_marginBottom="8dp"/>

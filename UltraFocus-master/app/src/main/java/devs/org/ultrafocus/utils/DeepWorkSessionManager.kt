@@ -635,7 +635,7 @@ object DeepWorkSessionManager {
         val now = System.currentTimeMillis()
         val phase = _state.value.phase
 
-        if (packageName == session.primaryAppPackage) {
+        if (FocusApps.contains(session.primaryAppPackage, packageName)) {
             graceJob?.cancel(); graceJob = null
             subSwitchGraceJob?.cancel(); subSwitchGraceJob = null
             if (phase == SessionPhase.PAUSED) {
@@ -663,7 +663,7 @@ object DeepWorkSessionManager {
                     graceJob = managerScope.launch {
                         delay(GRACE_PERIOD_MS)
                         graceJob = null
-                        val stillAway = lastSeenForegroundPackage != session.primaryAppPackage
+                        val stillAway = !FocusApps.contains(session.primaryAppPackage, lastSeenForegroundPackage)
                         if (stillAway) {
                             val pkg = lastSeenForegroundPackage ?: packageName
                             // Pause starts now — i.e. the grace period itself

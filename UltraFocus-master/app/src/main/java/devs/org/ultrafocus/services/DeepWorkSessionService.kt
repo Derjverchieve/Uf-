@@ -18,6 +18,7 @@ import devs.org.ultrafocus.model.SessionPhase
 import devs.org.ultrafocus.utils.DeepWorkSessionManager
 import devs.org.ultrafocus.utils.DurationFormatter
 import devs.org.ultrafocus.utils.FacePresenceDetector
+import devs.org.ultrafocus.utils.FocusApps
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -295,7 +296,8 @@ class DeepWorkSessionService : Service() {
      */
     private fun fireWorkSegmentStartAlert() {
         val state = DeepWorkSessionManager.state.value
-        val pkg = state.primaryAppPackage ?: return
+        // With several focus apps, open the first one (the primary)
+        val pkg = FocusApps.first(state.primaryAppPackage) ?: return
         val launchIntent = packageManager.getLaunchIntentForPackage(pkg)
             ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) ?: return
         val fullScreenPendingIntent = PendingIntent.getActivity(

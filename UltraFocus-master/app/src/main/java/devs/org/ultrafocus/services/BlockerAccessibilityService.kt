@@ -23,6 +23,7 @@ import devs.org.ultrafocus.repository.AppRepository
 import devs.org.ultrafocus.utils.ContentBlockManager
 import devs.org.ultrafocus.utils.KioskOverlayManager
 import devs.org.ultrafocus.utils.KioskPrefs
+import devs.org.ultrafocus.utils.FocusApps
 import devs.org.ultrafocus.model.SessionPhase
 import devs.org.ultrafocus.utils.SoftBlockManager
 import devs.org.ultrafocus.utils.SpecificScreenManager
@@ -323,7 +324,8 @@ class BlockerAccessibilityService : AccessibilityService() {
             if (!isNonAppWindow) {
                 val sessionPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager
                     .state.value.primaryAppPackage
-                val allowed = KioskPrefs.getAllowedPackages(this) + setOfNotNull(sessionPkg)
+                // sessionPkg can be several focus apps joined with "|" — allow every one of them
+                val allowed = KioskPrefs.getAllowedPackages(this) + FocusApps.packages(sessionPkg)
 
                 // Ground truth, not the raw event package — same reasoning as
                 // the preview blocker below: AnkiDroid's WebView reports as
