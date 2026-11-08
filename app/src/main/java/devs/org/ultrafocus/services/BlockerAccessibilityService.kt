@@ -5,26 +5,15 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
-import android.database.ContentObserver
-import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.provider.Settings
-import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.view.accessibility.AccessibilityWindowInfo
 import devs.org.ultrafocus.activities.BlockedAppActivity
 import devs.org.ultrafocus.activities.SoftBlockActivity
 import devs.org.ultrafocus.database.AppDatabase
 import devs.org.ultrafocus.repository.AppRepository
 import devs.org.ultrafocus.utils.ContentBlockManager
-import devs.org.ultrafocus.utils.KioskOverlayManager
-import devs.org.ultrafocus.utils.KioskPrefs
-import devs.org.ultrafocus.utils.FocusApps
-import devs.org.ultrafocus.model.SessionPhase
 import devs.org.ultrafocus.utils.SoftBlockManager
 import devs.org.ultrafocus.utils.SpecificScreenManager
 import devs.org.ultrafocus.utils.TemporaryAccessManager
@@ -34,18 +23,6 @@ import devs.org.ultrafocus.utils.WebsiteBlockManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
 import java.util.Calendar
-
-// Window types that are never meaningfully "a different app" for deep-work
-// tracking purposes, regardless of which package happens to own them —
-// keyboards, accessibility overlays (including this app's own block screen),
-// the split-screen divider, and the magnifier. Deliberately excludes
-// TYPE_SYSTEM (notification shade) — see DeepWorkSessionManager for why.
-private val DEEP_WORK_EXEMPT_WINDOW_TYPES = setOf(
-    AccessibilityWindowInfo.TYPE_INPUT_METHOD,
-    AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY,
-    AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER,
-    AccessibilityWindowInfo.TYPE_MAGNIFICATION_OVERLAY
-)
 
 class BlockerAccessibilityService : AccessibilityService() {
 
@@ -71,9 +48,9 @@ class BlockerAccessibilityService : AccessibilityService() {
     // Chrome preview / ephemeral tab IDs
     private val chromePreviewIds = listOf(
         "com.android.chrome:id/ephemeral_tab_view",
-        "com.android.chrome:id/preview_tab_view"
-        // tab_modal removed: it is a general dialog type (e.g. "Leave page?"),
-        // not specific to preview tabs, and fires during new-tab-in-group creation.
+        "com.android.chrome:id/preview_tab_view",
+        "com.android.chrome:id/tab_modal",
+        "com.android.chrome:id/open_new_tab_chip"
     )
 
     private val chromeTabSwitcherIds = listOf(
@@ -104,70 +81,6 @@ class BlockerAccessibilityService : AccessibilityService() {
     private lateinit var appRepository: AppRepository
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var isServiceReady = false
-    private lateinit var kioskOverlayManager: KioskOverlayManager
-
-    // ── Kiosk lock exemptions ────────────────────────────────────────────────
-
-    // Always reachable, lock or no lock — resolved via the standard "who
-    // handles ACTION_DIAL" query (no extra permission needed), plus a static
-    // fallback list for common phone/InCallUI packages in case resolution
-    // fails on a given OEM skin. Known limitation: this doesn't enumerate
-    // every OEM's exact incoming-call UI package, just the common ones.
-    private val dialerPackages: Set<String> by lazy {
-        val resolved = try {
-            packageManager.resolveActivity(
-                Intent(Intent.ACTION_DIAL), android.content.pm.PackageManager.MATCH_DEFAULT_ONLY
-            )?.activityInfo?.packageName
-        } catch (_: Exception) { null }
-        setOfNotNull(resolved) + setOf(
-            "com.google.android.dialer", "com.android.dialer", "com.android.server.telecom",
-            "com.android.incallui", "com.samsung.android.dialer", "com.samsung.android.incallui",
-            "com.transsion.phonebook"
-        )
-    }
-
-    // System UI (quick settings, volume panel, notification shade) and the
-    // HiOS launcher get a 10s grace instead of an instant block — see the
-    // kioskGraceStartMs field doc below for how the grace itself works.
-    // Also doubles as the single source of truth for the friendly labels
-    // used when the session timer pauses immediately on entry (see the
-    // Deep Work tracking call above) — one list, not two.
-    private val kioskGracePackages = mapOf(
-        "com.android.systemui" to "System UI",
-        "com.transsion.hilauncher" to "Home screen",
-        "com.transsion.xlauncher" to "Home screen"
-    )
-    private val KIOSK_GRACE_MS = 4_000L
-
-    // Cumulative — NOT reset each time you re-enter systemui/the launcher.
-    // Only resets when ground truth resolves to an allowed app or the dialer.
-    // Without this, tapping home for <10s at a time, repeatedly, would dodge
-    // the block indefinitely; with it, lingering across any number of bounces
-    // still adds up and blocks once the 10s total is spent.
-    private var kioskGraceStartMs: Long? = null
-
-    /**
-     * Detects volume changes made via the quick-settings slider (or any other method
-     * that changes the actual stream volume — physical buttons, assistant, etc.).
-     * Shows the kiosk quick-switch tile whenever the music stream volume changes.
-     * Registered in onServiceConnected, unregistered in onDestroy.
-     */
-    private val volumeObserver by lazy {
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        var lastVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-        object : ContentObserver(Handler(Looper.getMainLooper())) {
-            override fun onChange(selfChange: Boolean) {
-                val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                if (current != lastVolume &&
-                    devs.org.ultrafocus.utils.DeepWorkSessionManager.state.value.phase != SessionPhase.IDLE) {
-                    lastVolume = current
-                    val sessionPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager
-                        .state.value.primaryAppPackage
-                    kioskOverlayManager.show(alwaysIncludePkg = sessionPkg)
-                }
-            }
-        }
-    }
 
     private val currentlyBlockedApps = mutableSetOf<String>()
     private var blockedAppInfos: List<devs.org.ultrafocus.model.AppInfo> = emptyList()
@@ -196,45 +109,6 @@ class BlockerAccessibilityService : AccessibilityService() {
             loadBlockedApps()
             isServiceReady = true
         } catch (_: Exception) {}
-
-        // Independent ground-truth check for the deep work tracker — see
-        // DeepWorkSessionManager.groundTruthProvider for why this exists.
-        devs.org.ultrafocus.utils.DeepWorkSessionManager.groundTruthProvider = {
-            try {
-                (windows.firstOrNull { it.isActive } ?: windows.firstOrNull { it.isFocused })
-                    ?.root?.packageName?.toString()
-            } catch (_: Exception) {
-                null
-            }
-        }
-        devs.org.ultrafocus.utils.DeepWorkSessionManager.kioskGraceLabelProvider = { pkg ->
-            kioskGracePackages[pkg]
-        }
-
-        kioskOverlayManager = KioskOverlayManager(this)
-
-        // Observe actual music-stream volume changes so the quick-switch tile appears
-        // when the user adjusts volume via quick settings, assistant, or any method
-        // other than physical keys (which are handled by onKeyEvent as a fallback).
-        contentResolver.registerContentObserver(
-            Settings.System.CONTENT_URI,
-            true,
-            volumeObserver
-        )
-
-        // Persistent corner timer: shows lock icon + countdown whenever a
-        // session is active — kiosk is now tied directly to session phase,
-        // not a separate toggle (see class doc on kioskGraceStartMs above).
-        serviceScope.launch {
-            devs.org.ultrafocus.utils.DeepWorkSessionManager.state.collectLatest { state ->
-                if (state.phase != SessionPhase.IDLE) {
-                    kioskOverlayManager.showPersistentTimer()
-                } else {
-                    kioskOverlayManager.hidePersistentTimer()
-                    kioskGraceStartMs = null // fresh accumulator for the next session
-                }
-            }
-        }
     }
 
     private fun configureServiceInfo() {
@@ -249,8 +123,7 @@ class BlockerAccessibilityService : AccessibilityService() {
             flags = flags or
                 AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                 AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
-                AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
-                AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
+                AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
         }
     }
 
@@ -279,161 +152,27 @@ class BlockerAccessibilityService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
         val className = event.className?.toString() ?: ""
 
-        // ── Deep Work session tracking (additive) ───────────────────────
-        // Reports real foreground-app changes to the session manager for
-        // auto-pause/auto-resume. Deliberately runs before the self-package
-        // early-return below and is fully guarded so it can never affect
-        // the existing blocking behaviour.
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            try {
-                val windowType = try {
-                    windows.firstOrNull { it.id == event.windowId }?.type
-                } catch (_: Exception) {
-                    null
-                }
-                val isExemptWindowType = windowType != null && windowType in DEEP_WORK_EXEMPT_WINDOW_TYPES
-                // System UI / HiOS launcher: the session should stop crediting
-                // focus time the MOMENT you land here, even though the kiosk
-                // block itself waits KIOSK_GRACE_MS before actually bouncing
-                // you back — the timer and the block are deliberately on two
-                // different clocks now. See onForegroundAppChanged's doc.
-                val immediatePauseLabel = kioskGracePackages[packageName]
-                devs.org.ultrafocus.utils.DeepWorkSessionManager.onForegroundAppChanged(
-                    packageName, className, isExemptWindowType, immediatePauseLabel
-                )
-            } catch (_: Exception) {}
-        }
-
         if (packageName == this.packageName) return
 
-        // ── Kiosk lock: active whenever a session is running or paused ────────
-        // No longer a separate on/off toggle — starting a session activates
-        // it, and it releases the instant the session ends. That happens
-        // either automatically (target reached, no overtime — see
-        // DeepWorkSessionManager.tick) or via crash-recovery on next launch
-        // if the process dies. There is deliberately no in-app override.
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            devs.org.ultrafocus.utils.DeepWorkSessionManager.state.value.phase != SessionPhase.IDLE) {
-
-            val windowType = try {
-                windows.firstOrNull { it.id == event.windowId }?.type
-            } catch (_: Exception) { null }
-            val isNonAppWindow = packageName == "android" ||
-                (windowType != null && windowType in DEEP_WORK_EXEMPT_WINDOW_TYPES)
-
-            if (!isNonAppWindow) {
-                val sessionPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager
-                    .state.value.primaryAppPackage
-                // sessionPkg can be several focus apps joined with "|" — allow every one of them
-                val allowed = KioskPrefs.getAllowedPackages(this) + FocusApps.packages(sessionPkg)
-
-                // Ground truth, not the raw event package — same reasoning as
-                // the preview blocker below: AnkiDroid's WebView reports as
-                // com.android.chrome, so without this every Show Answer tap
-                // in a locked session would read "Chrome" (not allowed)
-                // instead of "AnkiDroid" (allowed).
-                val groundTruth = devs.org.ultrafocus.utils.DeepWorkSessionManager
-                    .groundTruthProvider?.invoke()
-                val checkPkg = groundTruth ?: packageName
-
-                when {
-                    checkPkg in dialerPackages -> {
-                        kioskGraceStartMs = null
-                    }
-                    checkPkg in allowed -> {
-                        kioskGraceStartMs = null
-                    }
-                    checkPkg in kioskGracePackages -> {
-                        val start = kioskGraceStartMs
-                            ?: System.currentTimeMillis().also { kioskGraceStartMs = it }
-                        if (System.currentTimeMillis() - start >= KIOSK_GRACE_MS) {
-                            performBlock(checkPkg, reason = "kiosk-grace-expired")
-                            return
-                        }
-                        // else: still within the cumulative grace window — allow silently
-                    }
-                    else -> {
-                        kioskGraceStartMs = null
-                        performBlock(checkPkg, reason = "kiosk-not-allowed")
-                        return
-                    }
-                }
-            }
-            // Non-app window, allowed app, or dialer — falls through to normal
-            // content blocking below.
-        }
+        // ── Preview‑page detection (immediate text trigger + delayed scan) ──
         if (browserPackages.contains(packageName) &&
             event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
 
-            // Guard 1: active-window package — AnkiDroid's embedded WebView fires
-            // TYPE_VIEW_CLICKED as "com.android.chrome" even when Anki is foreground.
-            val activeRoot = rootInActiveWindow
-            if (activeRoot == null || activeRoot.packageName?.toString() != packageName) return
-
-            // Guard 2: ground-truth — catches the bottom-of-button edge case where
-            // AnkiDroid's WebView sub-window briefly surfaces as the active window,
-            // making rootInActiveWindow look like Chrome even though Anki is foreground.
-            val groundTruth = devs.org.ultrafocus.utils.DeepWorkSessionManager
-                .groundTruthProvider?.invoke()
-            if (groundTruth != null && groundTruth != packageName) return
-
-            // Guard 3: new-tab action — any "new tab" or "add tab" button must never
-            // trigger preview blocking, even when the previous tab was a blocked site.
-            val clickedId = try { event.source?.viewIdResourceName } catch (_: Exception) { null }
-            if (clickedId != null && (
-                clickedId.contains("new_tab", ignoreCase = true) ||
-                clickedId.contains("add_tab", ignoreCase = true) ||
-                clickedId.contains("open_new_tab", ignoreCase = true))) return
-
-            // Immediate text check
-            val previewTriggerMatch = findPreviewTriggerFromNode(activeRoot)
-            if (previewTriggerMatch != null) {
-                val shown = previewTriggerMatch.take(80)
-                closePreviewAndExit(packageName, reason = "click-immediate-text: \"$shown\"")
+            val root = rootInActiveWindow
+            if (root != null && findPreviewTriggerFromNode(root)) {
+                closePreviewAndExit(packageName)
                 return
             }
 
-            // Delayed scan — 800ms so Chrome fully settles after tab creation.
-            // 400ms was not long enough: when opening a new tab from a blocked
-            // site's tab, Chrome's DOM still reported blocked URLs mid-transition.
             previewClickJob?.cancel()
             previewClickJob = serviceScope.launch {
-                delay(800)
+                delay(200)
                 val delayedRoot = rootInActiveWindow ?: return@launch
-                if (delayedRoot.packageName?.toString() != packageName) return@launch
-
-                // Ground truth at scan time — second chance to catch false events
-                val delayedTruth = devs.org.ultrafocus.utils.DeepWorkSessionManager
-                    .groundTruthProvider?.invoke()
-                if (delayedTruth != null && delayedTruth != packageName) return@launch
-
-                // New-tab / internal-page URL guard
-                val url = captureBrowserUrl(delayedRoot, packageName)
-                val isInternalPage = url.isNullOrBlank() ||
-                    url.equals("Search or type URL", ignoreCase = true) ||
-                    url.startsWith("chrome://", ignoreCase = true) ||
-                    url.startsWith("about:", ignoreCase = true)
-
-                if (!isInternalPage) {
-                    val previewNode = findChromePreviewNode(delayedRoot, packageName)
-                    if (previewNode != null) {
-                        try {
-                            if (scanForBlockedUrls(delayedRoot, packageName) ||
-                                isAnyBlockedHostCurrentlyBlockable(previewNode)) {
-                                closePreviewAndExit(packageName, reason = "click-delayed-preview-scan")
-                            }
-                        } finally {
-                            runCatching { previewNode.recycle() }
-                        }
+                if (delayedRoot.packageName?.toString() == packageName) {
+                    if (scanForBlockedUrls(delayedRoot, packageName) ||
+                        scanForBlockedContent(delayedRoot, packageName, hostnameCheck = true)) {
+                        closePreviewAndExit(packageName)
                     }
-                    // Not a preview: nothing else to do here. The main
-                    // scanning loop below already runs scanForBlockedUrls on
-                    // every content change independently, so this branch
-                    // doesn't need its own redundant call — and a prior
-                    // attempt at fixing this bug added exactly that
-                    // redundant call, which is itself a plausible source of
-                    // false positives, since address-bar text can be
-                    // momentarily stale during any tab transition.
                 }
             }
             return
@@ -468,7 +207,7 @@ class BlockerAccessibilityService : AccessibilityService() {
                             val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
                             am.killBackgroundProcesses(blockedPkg)
                         } catch (_: Exception) {}
-                        performBlock(blockedPkg, reason = "split-screen-guard")
+                        performBlock(blockedPkg)
                         return
                     }
                 }
@@ -481,34 +220,24 @@ class BlockerAccessibilityService : AccessibilityService() {
                     // URL check (normal pages)
                     if (scanForBlockedUrls(rootNode, packageName)) return
 
-                    // This is the path that actually explains "new tab" false
-                    // blocks surviving the click-handler fixes above: it runs
-                    // on every content change, not just clicks, and previously
-                    // had no new-tab/internal-page guard and scanned the WHOLE
-                    // tree for blocked hostnames instead of just the preview.
-                    val url = captureBrowserUrl(rootNode, packageName)
-                    val isInternalPage = url.isNullOrBlank() ||
-                        url.equals("Search or type URL", ignoreCase = true) ||
-                        url.startsWith("chrome://", ignoreCase = true) ||
-                        url.startsWith("about:", ignoreCase = true)
+                    val inPageView = isBrowserInPageView(rootNode, packageName)
+                    val inPreview = isChromePreview(rootNode, packageName)
 
-                    if (!isInternalPage) {
-                        val previewNode = findChromePreviewNode(rootNode, packageName)
-                        if (previewNode != null) {
-                            try {
-                                if (isAnyBlockedHostCurrentlyBlockable(previewNode)) {
-                                    closePreviewAndExit(packageName, reason = "mainloop-preview-scan")
-                                    return
-                                }
-                            } finally {
-                                runCatching { previewNode.recycle() }
-                            }
+                    // Content scan for hostnames – runs for both normal and preview,
+                    // but we only close the preview, never block a normal page from it
+                    if ((inPageView || inPreview) &&
+                        scanForBlockedContent(rootNode, packageName, hostnameCheck = true)) {
+
+                        if (inPreview) {
+                            closePreviewAndExit(packageName)
                         }
+                        // Do NOT call performBlock for normal pages – URL check is enough
+                        return
                     }
                 } else {
                     if (!contentScanExemptPackages.contains(packageName) &&
                         scanForBlockedContent(rootNode, packageName, hostnameCheck = false)) {
-                        performBlock(packageName, reason = "content-scan")
+                        performBlock(packageName)
                         return
                     }
                 }
@@ -521,61 +250,19 @@ class BlockerAccessibilityService : AccessibilityService() {
 
             if (className.isNotEmpty() &&
                 SpecificScreenManager.isScreenBlocked(this, className)) {
-                performBlock(packageName, reason = "specific-screen-blocked")
+                performBlock(packageName)
                 return
             }
 
             val appInfo = blockedAppInfos.find { it.packageName == packageName }
             if (appInfo != null && shouldBlockNow(appInfo)) {
-                performBlock(packageName, reason = "scheduled-app-block")
+                performBlock(packageName)
             }
         }
-    }
-
-    // ── Schedule‑aware hostname checker for previews ──────────────────────
-    /**
-     * Recursively scans visible text nodes for blocked hostnames.
-     * For each host found, it checks [WebsiteBlockManager.shouldBlockUrl] with a
-     * synthetic URL. Only returns true if at least one host is currently blockable
-     * (i.e. within its schedule and not temporarily allowed).
-     */
-    private fun isAnyBlockedHostCurrentlyBlockable(rootNode: AccessibilityNodeInfo): Boolean {
-        if (blockedHostsCache.isEmpty()) return false
-        return isAnyBlockedHostRecursive(rootNode, HashSet())
-    }
-
-    private fun isAnyBlockedHostRecursive(node: AccessibilityNodeInfo, visited: MutableSet<Int>): Boolean {
-        if (!node.isVisibleToUser) return false
-        val key = System.identityHashCode(node)
-        if (!visited.add(key)) return false
-
-        val combined = listOfNotNull(
-            node.text?.toString(),
-            node.contentDescription?.toString()
-        ).joinToString(" ").lowercase()
-
-        if (combined.isNotBlank()) {
-            for (host in blockedHostsCache) {
-                if (combined.contains(host) &&
-                    WebsiteBlockManager.shouldBlockUrl(this, "https://$host")) {
-                    return true
-                }
-            }
-        }
-
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            if (isAnyBlockedHostRecursive(child, visited)) {
-                child.recycle()
-                return true
-            }
-            child.recycle()
-        }
-        return false
     }
 
     // ── Preview close logic ───────────────────────────────────────────────
-    private fun closePreviewAndExit(packageName: String, reason: String = "unknown") {
+    private fun closePreviewAndExit(packageName: String) {
         if (TemporaryAccessManager.isAllowed(packageName)) return
 
         val now = System.currentTimeMillis()
@@ -585,7 +272,6 @@ class BlockerAccessibilityService : AccessibilityService() {
         }
         lastBlockedPackage = packageName
         lastBlockTime = now
-        debugToast("closePreviewAndExit", reason)
 
         val root = rootInActiveWindow
         if (root != null && findAndClickPreviewClose(root)) {
@@ -662,40 +348,23 @@ class BlockerAccessibilityService : AccessibilityService() {
         return false
     }
 
-    /**
-     * If Chrome is currently showing a link/tab preview (an "ephemeral tab"),
-     * returns the specific preview container node — caller must recycle it.
-     * Returns null if not in a preview, or if the tab switcher is showing
-     * (never a preview).
-     *
-     * Callers must scan for blocked hostnames WITHIN this node only, never
-     * the whole screen. The old whole-tree scan could pick up unrelated
-     * text — other tabs' titles in a tab-group strip, "Recently closed"
-     * suggestions on the new-tab page — and false-block on content that
-     * was never actually showing in the preview itself. This is the real
-     * cause behind "new tab" false blocks surviving three rounds of
-     * click-handler-only fixes: this function is also called from the
-     * periodic main-scanning-loop below, which runs on every content
-     * change independent of any click and had none of those guards.
-     */
-    private fun findChromePreviewNode(rootNode: AccessibilityNodeInfo, packageName: String): AccessibilityNodeInfo? {
-        if (packageName != "com.android.chrome") return null
+    private fun isChromePreview(rootNode: AccessibilityNodeInfo, packageName: String): Boolean {
+        if (packageName != "com.android.chrome") return false
         for (id in chromeTabSwitcherIds) {
             val nodes = try { rootNode.findAccessibilityNodeInfosByViewId(id) } catch (_: Exception) { null }
             if (!nodes.isNullOrEmpty()) {
                 nodes.forEach { runCatching { it.recycle() } }
-                return null
+                return false
             }
         }
         for (id in chromePreviewIds) {
             val nodes = try { rootNode.findAccessibilityNodeInfosByViewId(id) } catch (_: Exception) { null }
             if (!nodes.isNullOrEmpty()) {
-                val match = nodes.first()
-                nodes.drop(1).forEach { runCatching { it.recycle() } }
-                return match
+                nodes.forEach { runCatching { it.recycle() } }
+                return true
             }
         }
-        return null
+        return false
     }
 
     private fun captureBrowserUrl(rootNode: AccessibilityNodeInfo, packageName: String): String? {
@@ -717,66 +386,29 @@ class BlockerAccessibilityService : AccessibilityService() {
         return null
     }
 
-    // Requires the SAME captured url to be seen on a second, later scan
-    // pass — at least URL_CONFIRM_DELAY_MS after the first — before
-    // scanForBlockedUrls acts on it. See the function doc below for why.
-    private var pendingScanUrl: String? = null
-    private var pendingScanUrlSeenAtMs: Long = 0
-    private val URL_CONFIRM_DELAY_MS = 350L
-
-    /**
-     * Reads the address bar and redirects away if it matches a blocked
-     * rule. Runs unconditionally on every scan pass AND every delayed
-     * click-scan, with no preview check at all — this had NO stability
-     * guard through five rounds of fixing preview-detection logic
-     * elsewhere in this file. A tab transition (new tab, new tab in
-     * group, tab-switch animation) can leave the PREVIOUS tab's committed
-     * URL sitting in the omnibox for a moment before it updates, and a
-     * single instantaneous read can't tell that apart from genuinely
-     * navigating to a blocked site. Requiring the same url to persist
-     * across two reads, a beat apart, can.
-     */
     private fun scanForBlockedUrls(rootNode: AccessibilityNodeInfo, packageName: String): Boolean {
-        val currentUrl = captureBrowserUrl(rootNode, packageName) ?: run {
-            pendingScanUrl = null
-            return false
-        }
+        val currentUrl = captureBrowserUrl(rootNode, packageName) ?: return false
 
-        val matchesAllowlist = WebAllowlistManager.isBlockedByAllowlist(this, currentUrl)
-        val matchesSchedule = !matchesAllowlist && WebsiteBlockManager.shouldBlockUrl(this, currentUrl)
-        if (!matchesAllowlist && !matchesSchedule) {
-            pendingScanUrl = null
-            return false
-        }
-
-        val now = System.currentTimeMillis()
-        if (pendingScanUrl != currentUrl) {
-            pendingScanUrl = currentUrl
-            pendingScanUrlSeenAtMs = now
-            return false // first sighting of this exact url — not confirmed yet
-        }
-        if (now - pendingScanUrlSeenAtMs < URL_CONFIRM_DELAY_MS) {
-            return false // seen twice already, but still too close together
-        }
-        pendingScanUrl = null
-
-        if (matchesAllowlist) {
+        if (WebAllowlistManager.isBlockedByAllowlist(this, currentUrl)) {
             val blockKey = WebAllowlistManager::class.java.simpleName
+            val now = System.currentTimeMillis()
             if (blockKey == lastBlockedWebsiteKey && now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
             lastBlockedWebsiteKey = blockKey
             lastWebsiteBlockTime = now
-            debugToast("scanForBlockedUrls", "allowlist: $currentUrl")
             tryRedirectBrowserTab(rootNode, packageName)
             performGlobalAction(GLOBAL_ACTION_HOME)
             performRedirectToGoogle()
             return true
         }
 
+        if (!WebsiteBlockManager.shouldBlockUrl(this, currentUrl)) return false
+
         val blockKey = WebsiteBlockManager.normalizeHost(currentUrl)
-        if (blockKey == lastBlockedWebsiteKey && now - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
+        if (blockKey == lastBlockedWebsiteKey &&
+            System.currentTimeMillis() - lastWebsiteBlockTime < websiteBlockCooldownMs) return true
         lastBlockedWebsiteKey = blockKey
-        lastWebsiteBlockTime = now
-        debugToast("scanForBlockedUrls", "schedule: $currentUrl")
+        lastWebsiteBlockTime = System.currentTimeMillis()
+
         tryRedirectBrowserTab(rootNode, packageName)
         performGlobalAction(GLOBAL_ACTION_HOME)
         performRedirectToGoogle()
@@ -806,42 +438,29 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     private fun containsPreviewTrigger(text: String): Boolean {
         val norm = text.lowercase()
-        // Deliberately narrow: only match explicit preview-page labels.
-        // The old bare norm.contains("preview") caused new-tab pages and any
-        // element with the word "preview" (e.g. image previews) to fire the blocker.
-        return norm.contains("preview page") || norm.contains("open preview")
+        return norm.contains("preview page") || norm.contains("open preview") || norm.contains("preview")
     }
 
-    /**
-     * Returns the exact matched text if some node's text/contentDescription
-     * contains a preview trigger phrase, or null otherwise. Returning the
-     * actual match (not just a boolean) is deliberate: this exact check
-     * fired on a plain "new tab" click with no delay and no navigation
-     * involved at all, which strongly suggests it's matching something in
-     * Chrome's OWN UI unrelated to any real preview — most likely an
-     * accessibility content-description on the tab strip meant for screen
-     * readers. Surfacing the matched string in the block toast (see call
-     * site) tells us exactly what, instead of guessing at Chrome's
-     * internals a further time.
-     */
-    private fun findPreviewTriggerFromNode(node: AccessibilityNodeInfo?): String? {
-        if (node == null) return null
+    private fun findPreviewTriggerFromNode(node: AccessibilityNodeInfo?): Boolean {
+        if (node == null) return false
         return findPreviewTriggerFromNodeWithVisited(node, HashSet())
     }
 
-    private fun findPreviewTriggerFromNodeWithVisited(node: AccessibilityNodeInfo?, visited: MutableSet<Int>): String? {
-        if (node == null) return null
+    private fun findPreviewTriggerFromNodeWithVisited(node: AccessibilityNodeInfo?, visited: MutableSet<Int>): Boolean {
+        if (node == null) return false
         val key = System.identityHashCode(node)
-        if (!visited.add(key)) return null
+        if (!visited.add(key)) return false
         val text = listOfNotNull(node.text?.toString(), node.contentDescription?.toString()).joinToString(" ").trim()
-        if (text.isNotBlank() && containsPreviewTrigger(text)) return text
+        if (text.isNotBlank() && containsPreviewTrigger(text)) return true
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            val match = findPreviewTriggerFromNodeWithVisited(child, visited)
+            if (findPreviewTriggerFromNodeWithVisited(child, visited)) {
+                child.recycle()
+                return true
+            }
             child.recycle()
-            if (match != null) return match
         }
-        return null
+        return false
     }
 
     private fun scanForBlockedContent(
@@ -901,27 +520,7 @@ class BlockerAccessibilityService : AccessibilityService() {
         } catch (_: Exception) {}
     }
 
-    /**
-     * Temporary, low-noise diagnostic aid: shows exactly which mechanism
-     * fired a block and what triggered it. Only runs on an actual block
-     * action, not on every scan pass, so it shouldn't be spammy. Added
-     * after five rounds of guessing at preview-detection logic to fix
-     * "new tab" false blocks — this replaces guessing with a direct report
-     * of which of the several distinct block mechanisms in this file is
-     * actually responsible, next time it happens.
-     */
-    private fun debugToast(source: String, detail: String) {
-        val handler = android.os.Handler(android.os.Looper.getMainLooper())
-        handler.post {
-            try {
-                android.widget.Toast.makeText(
-                    this, "🔍 $source: $detail", android.widget.Toast.LENGTH_LONG
-                ).show()
-            } catch (_: Exception) {}
-        }
-    }
-
-    private fun performBlock(packageName: String, reason: String = "unknown") {
+    private fun performBlock(packageName: String) {
         if (packageName == this.packageName) return
         if (TemporaryAccessManager.isAllowed(packageName)) return
         try {
@@ -933,7 +532,6 @@ class BlockerAccessibilityService : AccessibilityService() {
             currentlyBlockedApps.add(packageName)
             lastBlockedPackage = packageName
             lastBlockTime = currentTime
-            debugToast("performBlock", "$reason -> $packageName")
 
             performGlobalAction(GLOBAL_ACTION_BACK)
             performGlobalAction(GLOBAL_ACTION_HOME)
@@ -969,36 +567,11 @@ class BlockerAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {}
 
-    /**
-     * Physical volume key fallback — shows the kiosk tile when hardware buttons work.
-     * The ContentObserver (volumeObserver) handles quick-settings slider changes.
-     * Always returns false so the volume still changes.
-     */
-    override fun onKeyEvent(event: KeyEvent?): Boolean {
-        if (event != null &&
-            event.action == KeyEvent.ACTION_DOWN &&
-            devs.org.ultrafocus.utils.DeepWorkSessionManager.state.value.phase != SessionPhase.IDLE &&
-            (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
-             event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
-            val sessionPkg = devs.org.ultrafocus.utils.DeepWorkSessionManager
-                .state.value.primaryAppPackage
-            kioskOverlayManager.show(alwaysIncludePkg = sessionPkg)
-        }
-        return false
-    }
-
     override fun onDestroy() {
         super.onDestroy()
-        try { contentResolver.unregisterContentObserver(volumeObserver) } catch (_: Exception) {}
         previewClickJob?.cancel()
         serviceScope.cancel()
         isServiceReady = false
         currentlyBlockedApps.clear()
-        if (::kioskOverlayManager.isInitialized) {
-            kioskOverlayManager.hidePersistentTimer()
-            kioskOverlayManager.destroy()
-        }
-        devs.org.ultrafocus.utils.DeepWorkSessionManager.groundTruthProvider = null
-        devs.org.ultrafocus.utils.DeepWorkSessionManager.kioskGraceLabelProvider = null
     }
 }
