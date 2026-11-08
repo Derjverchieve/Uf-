@@ -1,0 +1,715 @@
+package devs.org.ultrafocus.activities
+
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.LinearLayoutManager
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import devs.org.ultrafocus.adapters.PauseEventAdapter
+import devs.org.ultrafocus.adapters.PauseRow
+import devs.org.ultrafocus.adapters.SessionHistoryAdapter
+import devs.org.ultrafocus.database.AppDatabase
+import devs.org.ultrafocus.databinding.ActivityDeepWorkSessionBinding
+import devs.org.ultrafocus.model.FocusSession
+import devs.org.ultrafocus.model.HistoryItem
+import devs.org.ultrafocus.model.PauseReason
+import devs.org.ultrafocus.model.SessionPhase
+import devs.org.ultrafocus.model.SessionStatus
+import devs.org.ultrafocus.repository.DeepWorkRepository
+import devs.org.ultrafocus.services.DeepWorkSessionService
+import devs.org.ultrafocus.utils.DeepWorkPrefs
+import devs.org.ultrafocus.utils.DeepWorkExportManager
+import devs.org.ultrafocus.utils.DeepWorkImportManager
+import devs.org.ultrafocus.utils.DeepWorkSessionManager
+import devs.org.ultrafocus.utils.DurationFormatter
+import devs.org.ultrafocus.utils.FocusApps
+import devs.org.ultrafocus.utils.FocusScoreCalculator
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import java.util.concurrent.TimeUnit
+
+class DeepWorkSessionActivity : AppCompatActivity() {
+
+    private lateinit var binding: ActivityDeepWorkSessionBinding
+    private lateinit var repository: DeepWorkRepository
+
+    // Must be registered during Activity initialization (not inside onCreate
+    // logic) — this satisfies that.
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* no-op either way */ }
+
+    private val cameraPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* face detection activates on next session start */ }
+
+    private val exportLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        uri?.let {
+            val ok = DeepWorkExportManager.exportSessionsCsv(this, it)
+            Toast.makeText(
+                this,
+                if (ok) "Exported." else "Export failed.",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    private val exportBackupLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        uri?.let {
+            val ok = DeepWorkExportManager.exportBackupCsv(this, it)
+            Toast.makeText(this, if (ok) "Backup saved." else "Backup failed.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private val importLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri ?: return@registerForActivityResult
+        lifecycleScope.launch {
+            val result = DeepWorkImportManager.importBackupCsv(this@DeepWorkSessionActivity, uri)
+            val msg = when {
+                result.imported == 0 && result.skipped == 0 -> "Nothing to import."
+                result.invalid > 0 ->
+                    "Imported ${result.imported}, skipped ${result.skipped} duplicates, ${result.invalid} unreadable rows."
+                else ->
+                    "Imported ${result.imported} session${if (result.imported != 1) "s" else ""}" +
+                        if (result.skipped > 0) ", ${result.skipped} already present." else "."
+            }
+            Toast.makeText(this@DeepWorkSessionActivity, msg, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // Up to FocusApps.MAX_APPS focus apps as (package, label), in pick order.
+    // The FIRST one is the primary: it's the one launched when the session starts.
+    private var selectedApps: List<Pair<String, String>> = emptyList()
+    private var selectedCycleCount: Int = DeepWorkPrefs.MAX_CYCLES
+    private var lastShownSummaryId: Long? = null
+
+    private lateinit var pauseLogAdapter: PauseEventAdapter
+    private lateinit var breakdownAdapter: PauseEventAdapter
+    private lateinit var historyAdapter: SessionHistoryAdapter
+
+    private var pauseLogJob: kotlinx.coroutines.Job? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        binding = ActivityDeepWorkSessionBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        ViewCompat.setOnApplyWindowInsetsListener(binding.main) { v, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
+            insets
+        }
+
+        repository = DeepWorkRepository(AppDatabase.getDatabase(this))
+        DeepWorkSessionManager.init(applicationContext)
+        requestNotificationPermissionIfNeeded()
+
+        setupRecyclerViews()
+        restoreLastPrimaryApp()
+        clickListeners()
+        observeState()
+        observeSummary()
+        observeHistory()
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
+    private fun setupRecyclerViews() {
+        pauseLogAdapter = PauseEventAdapter(emptyList())
+        binding.recyclerPauseLog.layoutManager = LinearLayoutManager(this)
+        binding.recyclerPauseLog.adapter = pauseLogAdapter
+
+        breakdownAdapter = PauseEventAdapter(emptyList())
+        binding.recyclerBreakdown.layoutManager = LinearLayoutManager(this)
+        binding.recyclerBreakdown.adapter = breakdownAdapter
+
+        historyAdapter = SessionHistoryAdapter(emptyList<HistoryItem>()) { session ->
+            lifecycleScope.launch { showHistorySummary(session) }
+        }
+        binding.recyclerHistory.layoutManager = LinearLayoutManager(this)
+        binding.recyclerHistory.adapter = historyAdapter
+    }
+
+    private fun restoreLastPrimaryApp() {
+        val savedPkgs = DeepWorkPrefs.getLastPrimaryAppPackage(this) ?: return
+        val installed = FocusApps.packages(savedPkgs)
+            .filter { isAppInstalled(it) }
+            .take(FocusApps.MAX_APPS)
+        if (installed.isNotEmpty()) {
+            selectedApps = installed.map { it to appLabel(it) }
+            binding.txtPrimaryAppName.text = selectedAppsLabel()
+        }
+        binding.inputTargetMinutes.setText(DeepWorkPrefs.getLastTargetMinutes(this).toString())
+
+        binding.switchCycles.isChecked = DeepWorkPrefs.getCyclesEnabled(this)
+        binding.groupCycleOptions.visibility =
+            if (binding.switchCycles.isChecked) android.view.View.VISIBLE else android.view.View.GONE
+        selectedCycleCount = DeepWorkPrefs.getCyclesCount(this)
+        updateCycleCountButtonStyles()
+        binding.inputBreakMinutes.setText(DeepWorkPrefs.getBreakMinutes(this).toString())
+        updateStartButtonText()
+
+        updateStartButtonEnabled()
+    }
+
+    private fun appLabel(pkg: String): String = try {
+        packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+    } catch (_: Exception) {
+        pkg
+    }
+
+    private fun selectedAppsLabel(): String = FocusApps.joinNames(selectedApps.map { it.second })
+
+    private fun isAppInstalled(packageName: String): Boolean = try {
+        packageManager.getApplicationInfo(packageName, 0)
+        true
+    } catch (_: PackageManager.NameNotFoundException) {
+        false
+    }
+
+    // ── Click listeners ──────────────────────────────────────────────────
+
+    private fun clickListeners() {
+        binding.toolbar.setNavigationOnClickListener { finish() }
+
+        binding.rowPrimaryApp.setOnClickListener { showAppPicker() }
+
+        binding.btnPreset15.setOnClickListener { binding.inputTargetMinutes.setText("15") }
+        binding.btnPreset25.setOnClickListener { binding.inputTargetMinutes.setText("25") }
+        binding.btnPreset45.setOnClickListener { binding.inputTargetMinutes.setText("45") }
+        binding.btnPreset60.setOnClickListener { binding.inputTargetMinutes.setText("60") }
+
+        binding.switchCycles.setOnCheckedChangeListener { _, checked ->
+            binding.groupCycleOptions.visibility = if (checked) android.view.View.VISIBLE else android.view.View.GONE
+            DeepWorkPrefs.saveCyclesEnabled(this, checked)
+            updateStartButtonText()
+        }
+
+        binding.btnCycles2.setOnClickListener { setSelectedCycleCount(2) }
+        binding.btnCycles3.setOnClickListener { setSelectedCycleCount(3) }
+        binding.btnCycles4.setOnClickListener { setSelectedCycleCount(4) }
+
+        binding.txtExportCsv.setOnClickListener {
+            exportLauncher.launch("ultrafocus_deep_work_sessions.csv")
+        }
+
+        binding.txtExportBackup.setOnClickListener {
+            exportBackupLauncher.launch("ultrafocus_backup.csv")
+        }
+
+        binding.txtImportBackup.setOnClickListener {
+            importLauncher.launch(arrayOf("text/csv", "text/comma-separated-values", "*/*"))
+        }
+
+        binding.rowLeaderboard.setOnClickListener {
+            startActivity(Intent(this, LeaderboardActivity::class.java))
+        }
+
+        binding.rowKioskSetup.setOnClickListener {
+            startActivity(Intent(this, KioskSetupActivity::class.java))
+        }
+
+        binding.rowAnalytics.setOnClickListener {
+            startActivity(Intent(this, AnalyticsActivity::class.java))
+        }
+
+        binding.btnStartSession.setOnClickListener { startSessionFromInputs() }
+
+        binding.btnPauseResume.setOnClickListener {
+            val state = DeepWorkSessionManager.state.value
+            when {
+                state.phase == SessionPhase.RUNNING -> DeepWorkSessionManager.pauseManually()
+                state.phase == SessionPhase.PAUSED && state.currentPauseReason == PauseReason.MANUAL ->
+                    DeepWorkSessionManager.resumeManually()
+            }
+        }
+
+        // No click listener on btnEndSession: it stays disabled for the
+        // entire duration of an active session (see render()) — sessions
+        // now auto-complete the instant they hit target, so there's never a
+        // moment where a manual End would be both allowed and meaningful.
+    }
+
+    private fun setSelectedCycleCount(count: Int) {
+        selectedCycleCount = count
+        DeepWorkPrefs.saveCyclesCount(this, count)
+        updateCycleCountButtonStyles()
+    }
+
+    private fun updateCycleCountButtonStyles() {
+        val buttons = mapOf(2 to binding.btnCycles2, 3 to binding.btnCycles3, 4 to binding.btnCycles4)
+        buttons.forEach { (count, btn) ->
+            if (count == selectedCycleCount) {
+                btn.setBackgroundColor(getColor(devs.org.ultrafocus.R.color.primary))
+                btn.setTextColor(getColor(android.R.color.white))
+            } else {
+                btn.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                btn.setTextColor(getColor(devs.org.ultrafocus.R.color.text_primary))
+            }
+        }
+    }
+
+    private fun updateStartButtonText() {
+        binding.btnStartSession.text = if (binding.switchCycles.isChecked) "Start Cycle Plan" else "Start Session"
+    }
+
+    // Same launch pattern KioskOverlayManager already uses for its
+    // quick-switch tile. Called from a direct user tap (the Start button),
+    // so this is always safe — Android only restricts starting an activity
+    // from a BACKGROUND context, and we're squarely in the foreground here.
+    // Deliberately NOT reused for cycle-to-cycle transitions (after a
+    // break ends): that call would come from DeepWorkSessionManager while
+    // the app may not be in the foreground at all, which modern Android
+    // generally blocks outright. Doing that reliably needs a full-screen
+    // notification intent instead — a bigger, separate change.
+    private fun launchPrimaryApp(pkg: String) {
+        try {
+            val intent = packageManager.getLaunchIntentForPackage(pkg)
+                ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (intent != null) startActivity(intent)
+        } catch (_: Exception) {}
+    }
+
+    private fun startSessionFromInputs() {
+        if (selectedApps.isEmpty()) {
+            Toast.makeText(this, "Choose at least one focus app first.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // All focus apps travel through the existing primaryAppPackage / primaryAppName
+        // fields as joined strings ("a|b|c" / "A + B + C"), so no DB or CSV changes.
+        val pkg = FocusApps.joinPackages(selectedApps.map { it.first })
+        val name = selectedAppsLabel()
+        val launchPkg = selectedApps.first().first
+        val minutes = binding.inputTargetMinutes.text.toString().toIntOrNull()
+        if (minutes == null || minutes <= 0) {
+            Toast.makeText(this, "Enter a target duration in minutes.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (minutes > DeepWorkPrefs.MAX_TARGET_MINUTES) {
+            Toast.makeText(
+                this,
+                "Max session length is ${DeepWorkPrefs.MAX_TARGET_MINUTES} minutes — sessions lock until they end.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        DeepWorkPrefs.saveLastTargetMinutes(this, minutes)
+
+        if (binding.switchCycles.isChecked) {
+            val breakMinutes = binding.inputBreakMinutes.text.toString().toIntOrNull()
+            if (breakMinutes == null || breakMinutes <= 0) {
+                Toast.makeText(this, "Enter a break duration in minutes.", Toast.LENGTH_SHORT).show()
+                return
+            }
+            if (breakMinutes < DeepWorkPrefs.MIN_BREAK_MINUTES || breakMinutes > DeepWorkPrefs.MAX_BREAK_MINUTES) {
+                Toast.makeText(
+                    this,
+                    "Break must be ${DeepWorkPrefs.MIN_BREAK_MINUTES}–${DeepWorkPrefs.MAX_BREAK_MINUTES} minutes.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+            DeepWorkPrefs.saveBreakMinutes(this, breakMinutes)
+
+            DeepWorkSessionManager.startCyclePlan(pkg, name, minutes, breakMinutes, selectedCycleCount)
+
+            val intent = Intent(this, DeepWorkSessionService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+            launchPrimaryApp(launchPkg)
+
+            val worstCaseWork = minutes * selectedCycleCount
+            val worstCaseBreak = breakMinutes * selectedCycleCount
+            Toast.makeText(
+                this,
+                "Cycle plan locked — $selectedCycleCount× ($minutes min work + $breakMinutes min break)." +
+                    " Total: ${worstCaseWork + worstCaseBreak} min.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        DeepWorkSessionManager.startSession(pkg, name, TimeUnit.MINUTES.toMillis(minutes.toLong()))
+
+        val intent = Intent(this, DeepWorkSessionService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+        launchPrimaryApp(launchPkg)
+
+        Toast.makeText(this, "Session locked — ends automatically at 0:00.", Toast.LENGTH_LONG).show()
+    }
+
+    // ── App picker ───────────────────────────────────────────────────────
+
+    private fun showAppPicker() {
+        val pm = packageManager
+        val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+            .filter { pm.getLaunchIntentForPackage(it.packageName) != null && it.packageName != packageName }
+            .associateBy({ it.packageName }, { it.loadLabel(pm).toString() })
+            .toList()
+            .sortedBy { it.second.lowercase() }
+
+        if (apps.isEmpty()) {
+            Toast.makeText(this, "No launchable apps found.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val labels = apps.map { it.second }.toTypedArray()
+        val checked = BooleanArray(apps.size) { i -> selectedApps.any { it.first == apps[i].first } }
+
+        // Pick order is preserved: the first app in here is the primary (launched on Start).
+        val chosen = LinkedHashMap<String, String>()
+        selectedApps.forEach { (pkg, name) -> chosen[pkg] = name }
+
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle("Focus apps (${chosen.size}/${FocusApps.MAX_APPS})")
+            .setMultiChoiceItems(labels, checked) { d, which, isChecked ->
+                val alert = d as AlertDialog
+                val (pkg, name) = apps[which]
+                if (isChecked) {
+                    if (chosen.size >= FocusApps.MAX_APPS) {
+                        // Over the limit — undo the tick. The backing array has to be reset too,
+                        // otherwise the list re-ticks the row when it scrolls and recycles views.
+                        checked[which] = false
+                        alert.listView.setItemChecked(which, false)
+                        Toast.makeText(this, "Max ${FocusApps.MAX_APPS} focus apps.", Toast.LENGTH_SHORT).show()
+                        return@setMultiChoiceItems
+                    }
+                    chosen[pkg] = name
+                } else {
+                    chosen.remove(pkg)
+                }
+                alert.setTitle("Focus apps (${chosen.size}/${FocusApps.MAX_APPS})")
+            }
+            .setPositiveButton("Done", null)
+            .setNegativeButton("Cancel", null)
+            .create()
+
+        dialog.show()
+
+        // Wired after show() so an empty selection doesn't auto-dismiss the dialog.
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            if (chosen.isEmpty()) {
+                Toast.makeText(this, "Pick at least one app.", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            selectedApps = chosen.map { it.key to it.value }
+            binding.txtPrimaryAppName.text = selectedAppsLabel()
+            DeepWorkPrefs.saveLastPrimaryApp(
+                this,
+                FocusApps.joinPackages(selectedApps.map { it.first }),
+                selectedAppsLabel()
+            )
+            updateStartButtonEnabled()
+            dialog.dismiss()
+        }
+    }
+
+    private fun updateStartButtonEnabled() {
+        binding.btnStartSession.isEnabled = selectedApps.isNotEmpty()
+    }
+
+    // ── Observers ────────────────────────────────────────────────────────
+
+    private fun observeState() {
+        lifecycleScope.launch {
+            DeepWorkSessionManager.state.collectLatest { state ->
+                render(state)
+            }
+        }
+    }
+
+    private fun render(state: devs.org.ultrafocus.model.DeepWorkUiState) {
+        // Kiosk is tied directly to session phase now — no separate toggle.
+        // A break still counts as "active" here even though phase is IDLE.
+        binding.txtKioskStatus.text = if (state.phase != SessionPhase.IDLE || state.onBreak) "Active" else "Ready"
+
+        if (state.onBreak) {
+            renderBreak(state)
+            return
+        }
+
+        when (state.phase) {
+            SessionPhase.IDLE -> {
+                binding.cardLive.visibility = android.view.View.GONE
+                binding.cardBreak.visibility = android.view.View.GONE
+                binding.cardSetup.visibility = android.view.View.VISIBLE
+                binding.groupPauseLog.visibility = android.view.View.GONE
+                pauseLogJob?.cancel()
+            }
+            SessionPhase.RUNNING, SessionPhase.PAUSED -> {
+                binding.cardSetup.visibility = android.view.View.GONE
+                binding.cardBreak.visibility = android.view.View.GONE
+                binding.cardLive.visibility = android.view.View.VISIBLE
+                binding.groupSummary.visibility = android.view.View.GONE
+                binding.groupPauseLog.visibility = android.view.View.VISIBLE
+
+                // Hard-locked for the entire life of the session: it auto-
+                // completes the instant focused time hits target (no
+                // overtime), so there's never a moment where a manual End
+                // would be both allowed and meaningful. See DeepWorkSessionManager.tick.
+                binding.btnEndSession.isEnabled = false
+                binding.btnEndSession.alpha = 0.5f
+
+                if (state.totalCycles > 0) {
+                    binding.txtCycleProgress.visibility = android.view.View.VISIBLE
+                    binding.txtCycleProgress.text = "Cycle ${state.cycleIndex} of ${state.totalCycles}"
+                } else {
+                    binding.txtCycleProgress.visibility = android.view.View.GONE
+                }
+
+                if (state.phase == SessionPhase.RUNNING) {
+                    binding.txtLiveState.text = "Focused — ${state.primaryAppName}"
+                    binding.txtLiveState.setTextColor(getColor(devs.org.ultrafocus.R.color.unlocked_green))
+                    binding.btnPauseResume.text = "Pause"
+                    binding.btnPauseResume.isEnabled = true
+                } else {
+                    val who = state.currentPauseAppName ?: "away"
+                    binding.txtLiveState.text = if (state.currentPauseReason == PauseReason.MANUAL)
+                        "Paused" else "Paused — $who"
+                    binding.txtLiveState.setTextColor(getColor(devs.org.ultrafocus.R.color.soft_block_amber))
+                    if (state.currentPauseReason == PauseReason.MANUAL) {
+                        binding.btnPauseResume.text = "Resume"
+                        binding.btnPauseResume.isEnabled = true
+                    } else {
+                        binding.btnPauseResume.text = "Return to ${state.primaryAppName} to resume"
+                        binding.btnPauseResume.isEnabled = false
+                    }
+                }
+
+                val remaining = state.targetDurationMs - state.focusedTimeMs
+                if (remaining >= 0) {
+                    binding.txtLiveTimer.text = DurationFormatter.formatClock(remaining)
+                    binding.txtLiveTimer.setTextColor(getColor(devs.org.ultrafocus.R.color.text_primary))
+                } else {
+                    binding.txtLiveTimer.text = "+" + DurationFormatter.formatClock(-remaining)
+                    binding.txtLiveTimer.setTextColor(getColor(devs.org.ultrafocus.R.color.soft_block_amber))
+                }
+                binding.txtLiveSub.text =
+                    "${DurationFormatter.formatCompact(state.focusedTimeMs)} focused · ${state.pauseCount} pause${if (state.pauseCount == 1) "" else "s"}" +
+                    if (state.pauseTimeMs > 0) " · ${DurationFormatter.formatCompact(state.pauseTimeMs)} paused" else ""
+
+                if (state.sessionId != null) observeLivePauseLog(state.sessionId)
+            }
+        }
+    }
+
+    private fun renderBreak(state: devs.org.ultrafocus.model.DeepWorkUiState) {
+        binding.cardSetup.visibility = android.view.View.GONE
+        binding.cardLive.visibility = android.view.View.GONE
+        binding.groupSummary.visibility = android.view.View.GONE
+        binding.groupPauseLog.visibility = android.view.View.GONE
+        pauseLogJob?.cancel(); pauseLogJob = null
+        binding.cardBreak.visibility = android.view.View.VISIBLE
+
+        binding.txtBreakCycleProgress.text = "Cycle ${state.cycleIndex} of ${state.totalCycles} complete"
+        binding.txtBreakTimer.text = DurationFormatter.formatClock(state.breakRemainingMs)
+        binding.txtBreakNextUp.text = if (state.cycleIndex >= state.totalCycles)
+            "Last break — the plan ends when this hits 0:00."
+        else
+            "Next work segment starts automatically."
+    }
+
+    private fun observeLivePauseLog(sessionId: Long) {
+        if (pauseLogJob != null) return
+        pauseLogJob = lifecycleScope.launch {
+            repository.observePauseEventsForSession(sessionId).collectLatest { events ->
+                val rows = events.sortedByDescending { it.startTime }.map {
+                    PauseRow(
+                        label = it.appName ?: "Manual pause",
+                        durationMs = it.durationMs,
+                        ongoing = it.endTime == null
+                    )
+                }
+                pauseLogAdapter.submitList(rows)
+            }
+        }
+    }
+
+    private fun observeSummary() {
+        lifecycleScope.launch {
+            // combine (not just observing lastSummary alone) matters here:
+            // for a cycle plan, EVERY completed cycle assigns a fresh
+            // lastSummary value, but we only want to show it once, at the
+            // very end of the WHOLE plan — which happens after a TRAILING
+            // BREAK, with no further lastSummary assignment at that exact
+            // moment. Watching state too means the "break just ended" state
+            // change re-evaluates this against whatever summary is already
+            // sitting there, instead of that final summary being silently
+            // missed because nothing re-emitted it.
+            kotlinx.coroutines.flow.combine(
+                DeepWorkSessionManager.state,
+                DeepWorkSessionManager.lastSummary
+            ) { state, summary -> state to summary }
+                .collectLatest { (state, summary) ->
+                    if (summary == null) return@collectLatest
+                    if (state.phase != SessionPhase.IDLE || state.onBreak) return@collectLatest
+                    if (summary.sessionId == lastShownSummaryId) return@collectLatest
+                    lastShownSummaryId = summary.sessionId
+
+                    pauseLogJob?.cancel(); pauseLogJob = null
+                    binding.cardLive.visibility = android.view.View.GONE
+                    binding.cardBreak.visibility = android.view.View.GONE
+                    binding.groupPauseLog.visibility = android.view.View.GONE
+                    binding.cardSetup.visibility = android.view.View.VISIBLE
+                    binding.groupSummary.visibility = android.view.View.VISIBLE
+
+                    binding.txtSummaryScore.text = summary.focusScore.toString()
+                    binding.txtSummaryHeadline.text =
+                        if (summary.wasCancelled) "${summary.primaryAppName} · cancelled" else summary.primaryAppName
+                    binding.txtSummaryStats.text = buildString {
+                        append("Wall clock: ${DurationFormatter.formatCompact(summary.wallClockMs)}\n")
+                        append("Focused: ${DurationFormatter.formatCompact(summary.focusedTimeMs)}\n")
+                        append("Paused: ${DurationFormatter.formatCompact(summary.pauseTimeMs)} (${summary.pauseCount} breaks)\n")
+                        append("Avg focus segment: ${DurationFormatter.formatCompact(summary.averageFocusSegmentMs)}")
+                    }
+
+                    val breakdownRows = summary.breakdownByApp.map { PauseRow(it.appName, it.totalMs) }
+                    breakdownAdapter.submitList(breakdownRows)
+                    binding.txtBreakdownHeader.visibility =
+                        if (breakdownRows.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
+                }
+        }
+    }
+
+    private fun observeHistory() {
+        lifecycleScope.launch {
+            repository.observeAllSessions().collectLatest { sessions ->
+                val finished = sessions.filter { it.status != SessionStatus.RUNNING }
+                val items = buildHistoryItems(finished)
+                historyAdapter.submitList(items)
+                binding.txtNoHistory.visibility =
+                    if (finished.isEmpty()) android.view.View.VISIBLE else android.view.View.GONE
+            }
+        }
+    }
+
+    /**
+     * Groups sessions by calendar date (newest first). Each group is ordered
+     * most-recent-session first, followed by a DaySummaryRow showing the day's
+     * total focused time and session count.
+     */
+    private fun buildHistoryItems(sessions: List<FocusSession>): List<HistoryItem> {
+        if (sessions.isEmpty()) return emptyList()
+
+        val cal = java.util.Calendar.getInstance()
+        val today = java.util.Calendar.getInstance()
+        val yesterday = java.util.Calendar.getInstance().also { it.add(java.util.Calendar.DAY_OF_YEAR, -1) }
+        val dayFmt = java.text.SimpleDateFormat("EEE, MMM d", java.util.Locale.getDefault())
+
+        // Group by (year, dayOfYear), preserve newest-first order
+        val grouped = LinkedHashMap<Pair<Int, Int>, MutableList<FocusSession>>()
+        for (session in sessions.sortedByDescending { it.startTime }) {
+            cal.timeInMillis = session.startTime
+            val key = cal.get(java.util.Calendar.YEAR) to cal.get(java.util.Calendar.DAY_OF_YEAR)
+            grouped.getOrPut(key) { mutableListOf() }.add(session)
+        }
+
+        val result = mutableListOf<HistoryItem>()
+        for ((key, daySessions) in grouped) {
+            // Session rows (newest first within the day)
+            daySessions.forEach { result.add(HistoryItem.SessionRow(it)) }
+
+            // Day summary row
+            cal.set(java.util.Calendar.YEAR, key.first)
+            cal.set(java.util.Calendar.DAY_OF_YEAR, key.second)
+            val label = when {
+                key.first == today.get(java.util.Calendar.YEAR) &&
+                key.second == today.get(java.util.Calendar.DAY_OF_YEAR) -> "Today"
+                key.first == yesterday.get(java.util.Calendar.YEAR) &&
+                key.second == yesterday.get(java.util.Calendar.DAY_OF_YEAR) -> "Yesterday"
+                else -> dayFmt.format(cal.time)
+            }
+            result.add(HistoryItem.DaySummaryRow(
+                dateLabel = label,
+                totalFocusedMs = daySessions.sumOf { it.focusedTimeMs },
+                sessionCount = daySessions.size
+            ))
+        }
+        return result
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Camera permission — needed for face-presence auto-pause.
+        // Request once silently; user can re-prompt from system settings if denied.
+        if (android.content.pm.PackageManager.PERMISSION_GRANTED !=
+            checkSelfPermission(android.Manifest.permission.CAMERA)) {
+            cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+        }
+    }
+
+    private suspend fun showHistorySummary(session: FocusSession) {
+        val current = DeepWorkSessionManager.state.value
+        if (current.phase != SessionPhase.IDLE || current.onBreak) {
+            Toast.makeText(this, "Finish the current session first.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val pauses = repository.getPauseEventsForSession(session.id)
+        val breakdown = pauses
+            .groupBy { pause ->
+                pause.appPackage ?: when {
+                    !pause.appName.isNullOrBlank() -> pause.appName
+                    pause.reason == PauseReason.MANUAL -> "Manual pause"
+                    else -> pause.reason.name.lowercase()
+                        .replaceFirstChar { it.uppercase() }.replace('_', ' ')
+                }
+            }
+            .map { (_, evts) ->
+                val label = evts.firstOrNull { !it.appName.isNullOrBlank() }?.appName
+                    ?: if (evts.first().reason == PauseReason.MANUAL) "Manual pause"
+                    else evts.first().reason.name.lowercase()
+                        .replaceFirstChar { it.uppercase() }.replace('_', ' ')
+                PauseRow(
+                    label = label,
+                    durationMs = evts.sumOf { it.durationMs }
+                )
+            }
+            .sortedByDescending { it.durationMs }
+
+        val score = session.focusScore ?: FocusScoreCalculator.calculate(session.focusedTimeMs, session.pauseTimeMs)
+        val segments = (session.pauseCount + 1).coerceAtLeast(1)
+        val avgSegment = session.focusedTimeMs / segments
+        val wallClock = (session.endTime ?: session.startTime) - session.startTime
+
+        binding.cardLive.visibility = android.view.View.GONE
+        binding.cardBreak.visibility = android.view.View.GONE
+        binding.groupPauseLog.visibility = android.view.View.GONE
+        binding.cardSetup.visibility = android.view.View.VISIBLE
+        binding.groupSummary.visibility = android.view.View.VISIBLE
+
+        binding.txtSummaryScore.text = score.toString()
+        binding.txtSummaryHeadline.text =
+            if (session.status == SessionStatus.CANCELLED) "${session.primaryAppName} · cancelled" else session.primaryAppName
+        binding.txtSummaryStats.text = buildString {
+            append("Wall clock: ${DurationFormatter.formatCompact(wallClock)}\n")
+            append("Focused: ${DurationFormatter.formatCompact(session.focusedTimeMs)}\n")
+            append("Paused: ${DurationFormatter.formatCompact(session.pauseTimeMs)} (${session.pauseCount} breaks)\n")
+            append("Avg focus segment: ${DurationFormatter.formatCompact(avgSegment)}")
+        }
+        breakdownAdapter.submitList(breakdown)
+        binding.txtBreakdownHeader.visibility =
+            if (breakdown.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
+    }
+}

@@ -1,0 +1,307 @@
+package devs.org.ultrafocus.utils
+
+import android.content.Context
+import android.content.Intent
+import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
+import android.os.Handler
+import android.os.Looper
+import android.view.Gravity
+import android.view.LayoutInflater
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
+import devs.org.ultrafocus.R
+import devs.org.ultrafocus.model.SessionPhase
+
+/**
+ * Manages the kiosk quick-switch overlay — a floating row of app icons drawn
+ * using TYPE_ACCESSIBILITY_OVERLAY (no SYSTEM_ALERT_WINDOW needed; accessible
+ * from the AccessibilityService that owns this manager).
+ *
+ * Call [show] from the volume-key handler. The tile auto-hides after 5 seconds.
+ * [destroy] must be called in the service's onDestroy.
+ */
+class KioskOverlayManager(private val context: Context) {
+
+    private val windowManager =
+        context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var overlayView: View? = null
+    private var timerTickRunnable: Runnable? = null
+
+    // ── Persistent corner timer ───────────────────────────────────────────────
+    // A small non-interactive pill in the top-right corner showing the session
+    // countdown while kiosk mode is active. Managed by BlockerAccessibilityService
+    // via showPersistentTimer / hidePersistentTimer.
+
+    private var persistentTimerView: TextView? = null
+    private var persistentTimerParams: WindowManager.LayoutParams? = null
+    private var persistentTimerRunnable: Runnable? = null
+
+    fun showPersistentTimer() {
+        if (persistentTimerView != null) return // already showing
+
+        val density = context.resources.displayMetrics.density
+        val pill = TextView(context).apply {
+            textSize = 12f
+            setTextColor(0xFFFFFFFF.toInt())
+            setPadding(
+                (14 * density).toInt(), (6 * density).toInt(),
+                (14 * density).toInt(), (6 * density).toInt()
+            )
+            background = GradientDrawable().apply {
+                setColor(0xE0101018.toInt())
+                cornerRadius = 24 * density
+            }
+            text = "🔒 --:--"
+        }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = (16 * density).toInt()
+            y = (80 * density).toInt()
+        }
+
+        pill.setOnTouchListener(makeDragListener(pill, params))
+
+        try {
+            windowManager.addView(pill, params)
+            persistentTimerView = pill
+            persistentTimerParams = params
+            startPersistentTicker(pill)
+        } catch (_: Exception) {}
+    }
+
+    fun hidePersistentTimer() {
+        persistentTimerRunnable?.let { mainHandler.removeCallbacks(it) }
+        persistentTimerRunnable = null
+        persistentTimerView?.let {
+            try { windowManager.removeView(it) } catch (_: Exception) {}
+        }
+        persistentTimerView = null
+        persistentTimerParams = null
+    }
+
+    /**
+     * Touch listener that lets the user drag the timer pill anywhere on screen.
+     * Uses END gravity so x is measured from the right edge inward — the X delta
+     * is therefore inverted relative to raw touch movement.
+     */
+    private fun makeDragListener(
+        view: View,
+        params: WindowManager.LayoutParams
+    ): View.OnTouchListener {
+        var startParamX = 0
+        var startParamY = 0
+        var startTouchX = 0f
+        var startTouchY = 0f
+        return View.OnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    startParamX = params.x
+                    startParamY = params.y
+                    startTouchX = event.rawX
+                    startTouchY = event.rawY
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    // END gravity: moving finger right decreases x (pill moves right)
+                    params.x = (startParamX - (event.rawX - startTouchX)).toInt()
+                    params.y = (startParamY + (event.rawY - startTouchY)).toInt()
+                    // Clamp to non-negative so pill stays on screen
+                    params.x = maxOf(0, params.x)
+                    params.y = maxOf(0, params.y)
+                    try { windowManager.updateViewLayout(view, params) } catch (_: Exception) {}
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun startPersistentTicker(pill: TextView) {
+        persistentTimerRunnable?.let { mainHandler.removeCallbacks(it) }
+        val ticker = object : Runnable {
+            override fun run() {
+                if (persistentTimerView == null) return
+                val state = DeepWorkSessionManager.state.value
+                if (state.phase == SessionPhase.IDLE) {
+                    hidePersistentTimer()
+                    return
+                }
+                val timeStr = when {
+                    state.targetDurationMs <= 0L ->
+                        DurationFormatter.formatClock(state.focusedTimeMs)
+                    else -> {
+                        val remaining = state.targetDurationMs - state.focusedTimeMs
+                        if (remaining > 0L) DurationFormatter.formatClock(remaining)
+                        else "+${DurationFormatter.formatClock(-remaining)}"
+                    }
+                }
+                pill.text = "🔒 $timeStr"
+                mainHandler.postDelayed(this, 1_000L)
+            }
+        }
+        persistentTimerRunnable = ticker
+        mainHandler.post(ticker)
+    }
+
+    private val hideRunnable = Runnable { hide() }
+
+    /**
+     * Shows the tile. If already visible, resets the 5-second hide timer.
+     * [alwaysIncludePkg] is always added (typically the active session's primary app)
+     * even if it isn't in the persisted allowed-apps list.
+     */
+    fun show(alwaysIncludePkg: String? = null) {
+        val apps = KioskPrefs.getAllowedApps(context).toMutableMap()
+
+        // Always include every active focus app so you can return to any of them from the tile.
+        // [alwaysIncludePkg] may be several packages joined with "|" (see FocusApps).
+        FocusApps.packages(alwaysIncludePkg).forEach { pkg ->
+            if (pkg !in apps) {
+                try {
+                    val pm = context.packageManager
+                    val info = pm.getApplicationInfo(pkg, 0)
+                    apps[pkg] = pm.getApplicationLabel(info).toString()
+                } catch (_: Exception) {}
+            }
+        }
+
+        if (apps.isEmpty()) return
+
+        if (overlayView != null) {
+            // Already showing — just reset the auto-hide timer
+            mainHandler.removeCallbacks(hideRunnable)
+            mainHandler.postDelayed(hideRunnable, AUTO_HIDE_MS)
+            return
+        }
+
+        val view = LayoutInflater.from(context).inflate(R.layout.kiosk_overlay, null)
+        val container = view.findViewById<LinearLayout>(R.id.kioskAppContainer)
+
+        apps.forEach { (pkg, label) -> addAppIcon(container, pkg, label) }
+        if (container.childCount == 0) return
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            y = 160  // dp offset from screen bottom
+        }
+
+        try {
+            windowManager.addView(view, params)
+            overlayView = view
+            startTimerTicker(view.findViewById(R.id.kioskTimerText))
+            mainHandler.postDelayed(hideRunnable, AUTO_HIDE_MS)
+        } catch (_: Exception) {}
+    }
+
+    fun hide() {
+        mainHandler.removeCallbacks(hideRunnable)
+        timerTickRunnable?.let { mainHandler.removeCallbacks(it) }
+        timerTickRunnable = null
+        val view = overlayView ?: return
+        try { windowManager.removeView(view) } catch (_: Exception) {}
+        overlayView = null
+    }
+
+    fun destroy() {
+        hide()
+        hidePersistentTimer()
+    }
+
+    private fun startTimerTicker(timerText: TextView) {
+        timerTickRunnable?.let { mainHandler.removeCallbacks(it) }
+        val ticker = object : Runnable {
+            override fun run() {
+                if (overlayView == null) return
+                val state = DeepWorkSessionManager.state.value
+                timerText.text = when {
+                    state.phase == SessionPhase.IDLE -> ""
+                    state.targetDurationMs <= 0L ->
+                        DurationFormatter.formatClock(state.focusedTimeMs)
+                    else -> {
+                        val remaining = state.targetDurationMs - state.focusedTimeMs
+                        if (remaining > 0L) "${DurationFormatter.formatClock(remaining)} left"
+                        else "+${DurationFormatter.formatClock(-remaining)} overtime"
+                    }
+                }
+                mainHandler.postDelayed(this, 1_000L)
+            }
+        }
+        timerTickRunnable = ticker
+        mainHandler.post(ticker)
+    }
+
+    private fun addAppIcon(container: LinearLayout, packageName: String, label: String) {
+        val pm = context.packageManager
+
+        val item = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(20, 12, 20, 12)
+            isClickable = true
+            isFocusable = true
+            // Ripple on dark background
+            background = android.util.TypedValue().also { tv ->
+                context.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
+            }.resourceId.takeIf { it != 0 }?.let {
+                context.getDrawable(it)
+            }
+        }
+
+        val icon = ImageView(context).apply {
+            layoutParams = LinearLayout.LayoutParams(72, 72)
+            try { setImageDrawable(pm.getApplicationIcon(packageName)) }
+            catch (_: Exception) { setImageResource(R.mipmap.ic_launcher) }
+        }
+
+        val labelView = TextView(context).apply {
+            text = label.take(10)
+            textSize = 10f
+            gravity = Gravity.CENTER
+            setTextColor(0xFFFFFFFF.toInt())
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = 4 }
+        }
+
+        item.addView(icon)
+        item.addView(labelView)
+
+        item.setOnClickListener {
+            hide()
+            try {
+                val intent = pm.getLaunchIntentForPackage(packageName)
+                    ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    ?: return@setOnClickListener
+                context.startActivity(intent)
+            } catch (_: Exception) {}
+        }
+
+        container.addView(item)
+    }
+
+    companion object {
+        private const val AUTO_HIDE_MS = 5_000L
+    }
+}
